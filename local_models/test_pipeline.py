@@ -93,7 +93,7 @@ def step_asr(video_path: str) -> str:
         audio_path, "-y", "-loglevel", "error",
     ], check=True, timeout=30)
 
-    asr = WhisperASR(model_size="small", compute_type="int8")
+    asr = WhisperASR()
     asr.load()
     text = asr.transcribe(audio_path)
     asr.unload()
@@ -117,7 +117,7 @@ def step_llm(text: str) -> str:
 
 
 def step_tts(text: str) -> str:
-    """TTS：语音合成（SDK 模式，从本地加载模型），返回音频文件路径"""
+    """TTS：语音合成（纯本地推理，从本地加载模型），返回音频文件路径"""
     from local_models.tts_engine import CosyVoiceEngine
 
     engine = CosyVoiceEngine()

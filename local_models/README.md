@@ -1,6 +1,6 @@
 # 本地模型模块（local_models）
 
-全本地化 AI 数字人管线：**ASR → LLM → TTS → LipSync**，所有模型从本地 `pretrained_models/` 目录加载，无需联网。
+全本地化 AI 数字人管线：**ASR → LLM → TTS → LipSync**。ASR/TTS/LipSync 统一使用 ModelScope pipeline 加载，LLM 使用 Transformers 原生推理，所有模型从本地 `pretrained_models/` 目录加载，无需联网。
 
 ## 目录结构
 
@@ -42,6 +42,8 @@ IP_Agent/
 | TTS | CosyVoice-300M | `pretrained_models/CosyVoice-300M/` | GPU | ✅ |
 | LipSync | MuseTalk | `pretrained_models/MuseTalk/` | GPU | 可选 |
 
+> ASR/TTS/LipSync 使用 ModelScope pipeline 加载；LLM 使用 Transformers 原生推理（ModelScope pipeline 不支持 chat template）。
+
 ## 快速开始
 
 ### 1. 准备本地模型
@@ -66,7 +68,7 @@ python local_models/pipeline_gradio.py
 ```bash
 python local_models/test_asr.py      # 语音识别测试
 python local_models/test_llm.py      # LLM 仿写测试
-python local_models/test_tts.py      # 语音合成测试（SDK 模式）
+python local_models/test_tts.py      # 语音合成测试（纯本地推理）
 python local_models/test_lipsync.py  # 口型合成测试
 python local_models/test_pipeline.py --full  # 全流程测试
 ```
@@ -107,9 +109,10 @@ print(result)  # "✅ 抖音发布成功"
 
 ## 关键设计
 
+- **ASR/TTS/LipSync 统一使用 ModelScope pipeline** — 单一接口加载，代码简洁统一
+- **LLM 使用 Transformers 原生推理** — ModelScope pipeline 不支持 chat template，保留原生方案
 - **所有模型从本地 `pretrained_models/` 加载**，`config.py` 统一管理路径
 - **`local_files_only=True`** — LLM/ASR 拒绝联网下载
 - **LLM 固定使用 Qwen2.5-0.5B**（最小参数量）
 - **ASR 固定在 CPU**，LLM/TTS/LipSync 运行在 GPU
-- **TTS 纯本地推理** — 直接从本地 CosyVoice 目录加载，无需 API 服务
 - **抖音发布使用 Playwright + CDP** — 控制已登录 Chrome 自动发布

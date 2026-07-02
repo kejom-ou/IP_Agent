@@ -1,14 +1,19 @@
 """
-本地语音合成引擎（CosyVoice，纯本地推理）
+本地语音合成引擎（ModelScope pipeline，从本地加载模型）
 """
 
 import gc
 import logging
 import tempfile
+import numpy as np
 from pathlib import Path
 from typing import Optional, List, Tuple
 
 import torch
+import soundfile as sf
+
+from modelscope.pipelines import pipeline
+from modelscope.utils.constant import Tasks
 
 from local_models.config import TTS_CONFIG
 
@@ -16,15 +21,16 @@ logger = logging.getLogger(__name__)
 
 
 class CosyVoiceEngine:
-    """CosyVoice TTS 引擎 — 纯本地 SDK 推理"""
+    """CosyVoice TTS 引擎 — ModelScope pipeline + 本地模型"""
 
     def __init__(self, local_path: str = None):
-        self.local_path = local_path or TTS_CONFIG["local_path"]
-        self.model = None
+        self.model_path = local_path or TTS_CONFIG["local_path"]
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.pipeline = None
 
-    # ---- 本地模型加载 ----
+    # ---- 模型加载 ----
 
-    def load_sdk(self) -> bool:
+    def load_model(self) -> bool:
         """从本地目录加载 CosyVoice 模型（GPU）"""
         try:
             gc.collect()
@@ -33,58 +39,58 @@ class CosyVoiceEngine:
             else:
                 logger.warning("⚠️ 未检测到 CUDA，CosyVoice 将在 CPU 上运行（较慢）")
 
-            import sys
-            cosy_path = str(Path(self.local_path).parent)
-            if cosy_path not in sys.path:
-                sys.path.insert(0, cosy_path)
-
-            from cosyvoice.cli.cosyvoice import CosyVoice
-            logger.info(f"加载 CosyVoice 从: {self.local_path}")
-            self.model = CosyVoice(self.local_path, load_jit=False, load_trt=False, fp16=torch.cuda.is_available())
-            logger.info(f"CosyVoice 加载完成 (GPU={torch.cuda.is_available()})")
+            logger.info(f"加载 CosyVoice pipeline 从: {self.model_path}")
+            self.pipeline = pipeline(
+                task=Tasks.text_to_speech,
+                model=self.model_path,
+                device=self.device,
+            )
+            logger.info(f"CosyVoice pipeline 加载完成 (GPU={torch.cuda.is_available()})")
             return True
         except ImportError:
-            logger.error("CosyVoice SDK 未安装 → 请安装 CosyVoice")
+            logger.error("modelscope 未安装 → pip install modelscope")
             return False
         except Exception as e:
             logger.error(f"CosyVoice 加载失败: {e}")
             return False
 
-    # ---- 本地推理 ----
+    # ---- 推理 ----
 
     def synthesize(
         self, text: str, speaker: str = "default", speed: float = 1.0,
         output_path: Optional[str] = None,
     ) -> Optional[str]:
         """从本地模型推理合成语音"""
-        if self.model is None and not self.load_sdk():
+        if self.pipeline is None and not self.load_model():
             return None
 
         if output_path is None:
             output_path = tempfile.mktemp(suffix=".wav")
 
         try:
-            output = self.model.inference_sft(
-                tts_text=text,
-                spk_id=speaker,
-                stream=False,
-                speed=speed,
-            )
-            import soundfile as sf
-            import numpy as np
-            sf.write(output_path, np.array(output), 22050)
+            result = self.pipeline(input=text, spk_id=speaker, speed=speed)
+            # ModelScope CosyVoice pipeline 返回 {'output_wav': numpy.ndarray} 或文件路径
+            wav = result.get("output_wav")
+            if wav is None:
+                wav = result  # fallback: 可能直接返回 numpy array
+            if isinstance(wav, str):
+                # 返回的是文件路径，直接复制
+                import shutil
+                shutil.copy(wav, output_path)
+            else:
+                sf.write(output_path, np.array(wav), 22050)
             logger.info(f"语音合成完成: {output_path}")
             return output_path
         except Exception as e:
-            logger.error(f"本地推理合成失败: {e}")
+            logger.error(f"合成失败: {e}")
             return None
 
     # ---- 卸载 ----
 
     def unload(self):
-        if self.model is not None:
-            del self.model
-            self.model = None
+        if self.pipeline is not None:
+            del self.pipeline
+            self.pipeline = None
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -95,10 +101,10 @@ class CosyVoiceEngine:
 # ---------------------------------------------------------------------------
 
 def get_pt_files_local() -> List[Tuple[str, str]]:
-    """获取可用音色列表（本地音色）"""
+    """获取可用音色列表"""
     return [
-        ("默认女声", "default_female"),
-        ("默认男声", "default_male"),
+        ("默认女声", "中文女"),
+        ("默认男声", "中文男"),
     ]
 
 
@@ -109,7 +115,7 @@ def handle_audio_creation_local(
         return None, "文案为空"
 
     pt_files = get_pt_files_local()
-    speaker = pt_files[speaker_index][1] if 0 <= speaker_index < len(pt_files) else "default"
+    speaker = pt_files[speaker_index][1] if 0 <= speaker_index < len(pt_files) else "中文女"
 
     engine = CosyVoiceEngine()
     audio_path = engine.synthesize(text=text, speaker=speaker, speed=speed)

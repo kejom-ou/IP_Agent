@@ -1,182 +1,189 @@
+# IP Agent — 本地化 AI 数字人口播视频生成
 
+全本地推理的 AI 数字人管线：**ASR（语音识别）→ LLM（文案仿写）→ TTS（语音合成）→ LipSync（口型合成）**。ASR/TTS/LipSync 统一使用 ModelScope pipeline 加载，LLM 使用 Transformers 原生推理，所有模型从本地加载，无需联网。
 
-# 旗博士-商业级应用🚀 AI 数字人口播视频自动化生成工具
-> 旗博士爆款口播视频自动生成智能体
-> 
-> 一个 本地运行、模块化、可扩展 的
-> 数字人口播视频生成与多平台发布自动化工程
+## 目录结构
 
-![UI 界面预览](show.png)
-
-
----
-
-## 📌 项目简介
-
-本项目是一个 **完整的 AI 数字人口播视频自动化生成流程工程**，将文案处理、语音合成、数字人驱动、视频后期及多平台发布整合为统一流水线。
-
-项目重点在于 **工程整合与流程自动化**，而非单一模型能力，适用于学习、研究及 AI 视频系统原型验证。
-
----
-
-## 支持一键自动产出爆款视频
-
-- 1.自动提取对标文案 
-- 2.自动进行文案仿写 
-- 3.自动根据文案声音克隆 
-- 4.自动生成数字人口播 
-- 5.自动添加字幕 
-- 6.自动添加背景音乐 
-- 7.自动添加视频标题 
-- 8.自动生成视频封面
-- 9.自动将视频发布到各平台（某抖，某蝴蝶号、某手，某红书）
-
----
-
-## ✨ 功能特性
-
-* 自动提取并处理对标视频口播文案
-* 文案语义级仿写与结构重组
-* 高保真语音克隆与合成
-* 数字人口播视频自动生成
-* 自动生成字幕、背景音乐、标题与封面
-* 多平台视频自动发布
-* 全流程本地运行，无云端依赖
-
----
-
-## 🧠 自动化流程
-
-```text
-对标文案提取
-        ↓
-文案仿写与优化
-        ↓
-语音合成 / 声音克隆
-        ↓
-数字人口播生成
-        ↓
-字幕 / BGM / 封面合成
-        ↓
-多平台发布
+```
+IP_Agent/
+├── pretrained_models/              # 模型存放目录（需自行准备）
+│   ├── faster-whisper-small/       # ASR: faster-whisper
+│   ├── Qwen2.5-0.5B-Instruct/      # LLM: Qwen2.5-0.5B
+│   ├── CosyVoice-300M/             # TTS: CosyVoice-300M
+│   └── MuseTalk/                   # LipSync: MuseTalk
+└── local_models/
+    ├── config.py                   # 模型路径 & 设备配置
+    ├── asr_engine.py               # 语音识别
+    ├── llm_engine.py               # 文案仿写
+    ├── tts_engine.py               # 语音合成
+    ├── lipsync.py                  # 口型合成
+    ├── pipeline_gradio.py          # Gradio Web 界面
+    ├── publisher.py                # 抖音自动发布
+    └── test_*.py                   # 单模块测试
 ```
 
----
+## 准备模型
 
-## 🧩 项目结构
+将所有模型放到 `pretrained_models/` 对应子目录：
 
-项目采用 **模块化设计**，各功能模块解耦，便于替换与扩展：
+| 模型 | 目录 | 设备 |
+|------|------|------|
+| faster-whisper-small | `pretrained_models/faster-whisper-small/` | CPU |
+| Qwen2.5-0.5B-Instruct | `pretrained_models/Qwen2.5-0.5B-Instruct/` | GPU |
+| CosyVoice-300M | `pretrained_models/CosyVoice-300M/` | GPU |
+| MuseTalk | `pretrained_models/MuseTalk/` | GPU |
 
-```text
-project-root/
-├── script/              # 文案处理模块
-│   ├── extractor/       # 对标文案提取
-│   └── rewriter/        # 文案仿写
-├── audio/               # 音频处理模块
-│   ├── asr/             # 语音识别（Whisper）
-│   └── tts/             # 语音合成（CosyVoice）
-├── avatar/              # 数字人模块
-│   └── heygem/          # 数字人驱动
-├── video/               # 视频后期模块
-│   ├── subtitle/        # 字幕生成
-│   ├── bgm/             # 背景音乐
-│   └── ffmpeg/          # 视频合成流水线
-├── uploader/            # 发布模块
-│   └── multi_platform/  # 多平台发布
-└── client/              # 本地客户端
+检查模型就绪状态：
+
+```bash
+python local_models/test_downloader.py
 ```
 
----
+## 各模块用法
 
-## 🔧 技术栈
+所有命令在项目根目录下执行。
 
-| 模块    | 技术方案                        |
-| ----- | --------------------------- |
-| 语音识别  | Whisper                     |
-| 语音合成  | CosyVoice                   |
-| 数字人驱动 | HeyGem                      |
-| 视频处理  | FFmpeg                      |
-| 自动发布  | 平台 API / social-auto-upload |
+### 1. ASR — 语音识别
 
----
+```python
+from local_models.asr_engine import WhisperASR
 
-## 📦 安装说明
+asr = WhisperASR()
+asr.load()
+text = asr.transcribe("audio.wav")
+print(text)
+asr.unload()
+```
 
-> 由于模型文件及依赖体积较大，项目资源拆分提供。
+测试：
 
-1. **下载项目源码**
-   详见：`代码地址.txt`
+```bash
+python local_models/test_asr.py
+# 输入音频文件路径
+```
 
+### 2. LLM — 文案仿写
 
-2. **启动本地客户端**
+```python
+from local_models.llm_engine import LocalLLMEngine
 
----
+engine = LocalLLMEngine()
+engine.init()
+result = engine.rewrite("原始文案", mode="AI自动仿写")
+print(result)
+engine.unload()
+```
 
-## ▶️ 使用方式
+测试：
 
-当前版本通过 **本地客户端** 控制完整流水线，基本使用流程如下：
+```bash
+python local_models/test_llm.py
+# 输入文案，交互式仿写
+```
 
-1. 配置对标内容或原始文案
-2. 执行文案仿写模块
-3. 选择语音与数字人
-4. 生成口播视频
-5. 自动完成字幕、BGM、封面
-6. 选择平台进行发布
+### 3. TTS — 语音合成
 
----
+```python
+from local_models.tts_engine import CosyVoiceEngine
 
-## 🧪 设计原则
+engine = CosyVoiceEngine()
+result = engine.synthesize(
+    text="你好，欢迎收看今天的节目",
+    speaker="中文女",
+    speed=1.0,
+    output_path="output.wav",
+)
+engine.unload()
+```
 
-* **本地优先**：不依赖云端服务
-* **模块解耦**：各模块可独立替换
-* **流程可控**：每一步可单独调试
-* **工程导向**：强调稳定性与可维护性
+测试：
 
----
-## 📖 联系交流-799元购买成品软件、9.9元试用、白票勿扰
+```bash
+python local_models/test_tts.py
+# 输入合成文本，生成 test_output.wav
+```
 
-> 可联系交流wx：
-![介绍图](https://github.com/fa1314/ip-human-agent/blob/main/Contact_wx.png)
+### 4. LipSync — 口型合成
 
----
-## ⚠️ 已知限制
+```python
+from local_models.lipsync import MuseTalkEngine
 
-* 对硬件资源（尤其 GPU）有一定要求
-* 不同平台上传接口可能存在变动
-* 数字人口播效果依赖上游模型质量
+engine = MuseTalkEngine()
+engine.load()
+engine.generate(
+    video_path="input.mp4",   # 数字人视频
+    audio_path="audio.wav",   # 音频
+    output_path="output.mp4",
+)
+engine.unload()
+```
 
----
+测试：
 
-## 🤝 致谢
+```bash
+python local_models/test_lipsync.py
+# 输入口播视频路径和音频路径
+```
 
-本项目基于以下优秀开源项目与工具构建，在此表示感谢：
+## Pipeline 全流程
 
-* [Whisper](https://github.com/openai/whisper)
-* [CosyVoice](https://github.com/tencent-ailab/cosyvoice)
-* [HeyGem](https://github.com/...)
-* [social-auto-upload](https://github.com/...)
-* FFmpeg
+### Gradio Web 界面（推荐）
 
----
+```bash
+python local_models/pipeline_gradio.py
+# 访问 http://localhost:7861
+```
 
-## 📄 使用限制与声明
+提供四个步骤的独立操作 + 一键全流程：
+1. **ASR** — 上传视频，提取音频并转写
+2. **LLM** — 输入文案，AI 仿写优化
+3. **TTS** — 文案合成语音
+4. **LipSync** — 视频 + 音频合成数字人口播
 
-* 本项目 **仅用于个人学习、研究和技术交流**
-* 🚫 禁止任何形式的商业用途
-* 🚫 禁止基于本项目提供付费服务或二次分发
-* 使用本项目产生的内容与风险由使用者自行承担
+### 命令行全流程测试
 
----
+```bash
+# 环境检查
+python local_models/test_pipeline.py
 
-## 📖 About
+# 全流程（自动生成测试视频）
+python local_models/test_pipeline.py --full
 
-本仓库展示了一个 **完整、可运行的 AI 数字人口播视频自动化工程实现**，侧重 **系统集成与工程实践**。
+# 指定视频 + 自定义文案
+python local_models/test_pipeline.py --video input.mp4 --text "今天给大家分享一个..."
 
-适用于：
+# 跳过特定步骤
+python local_models/test_pipeline.py --full --skip-llm --skip-lipsync
+```
 
-* AI 视频方向技术学习
-* 数字人系统原型验证
-* 自动化内容生成流程研究
+## 抖音自动发布
 
----
+需先以调试模式启动 Chrome：
 
+```bash
+# macOS
+open -a "Google Chrome" --args --remote-debugging-port=9222
+```
+
+```bash
+pip install playwright
+playwright install chromium
+```
+
+```python
+from local_models.publisher import auto_publishing_videos_DY
+
+result = auto_publishing_videos_DY(
+    video_path="/path/to/video.mp4",
+    title="视频标题",
+    pulish_with_cover=False,
+)
+```
+
+## 关键设计
+
+- **ASR/TTS/LipSync 统一 ModelScope pipeline** — 单一接口加载，代码简洁统一
+- **LLM 使用 Transformers 原生推理** — ModelScope pipeline 不支持 chat template，保留原生方案
+- **全本地推理** — 所有模型从 `pretrained_models/` 加载，不联网下载
+- **LLM 固定 Qwen2.5-0.5B** — 最小参数量，降低硬件门槛
+- **模块解耦** — 每个模块可独立使用、独立测试

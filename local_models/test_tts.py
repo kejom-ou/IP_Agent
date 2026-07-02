@@ -1,5 +1,5 @@
 """
-TTS 单项测试 — 使用本地 CosyVoice 模型（SDK 模式）
+TTS 单项测试 — 使用本地 CosyVoice 模型（纯本地 Python 推理）
 """
 
 import os

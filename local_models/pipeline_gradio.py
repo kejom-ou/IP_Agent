@@ -50,7 +50,7 @@ def _get_whisper():
     global _whisper_engine
     if _whisper_engine is None:
         from local_models.asr_engine import WhisperASR
-        _whisper_engine = WhisperASR(model_size="small", compute_type="int8")
+        _whisper_engine = WhisperASR()
         _whisper_engine.load()
     return _whisper_engine
 
@@ -174,7 +174,7 @@ def step2_rewrite(text: str, ai_mode: str, custom_prompt: str) -> Tuple[str, str
 
 def step3_generate_audio(text: str, speed: float) -> Tuple[Optional[str], str]:
     """
-    使用 CosyVoice（SDK 模式，从本地模型加载）将文案合成为语音。
+    使用 CosyVoice（纯本地推理，从本地模型加载）将文案合成为语音。
     """
     if not text or not text.strip():
         return None, "❌ 文案为空"
@@ -324,9 +324,9 @@ def check_environment() -> str:
     # Whisper
     try:
         import faster_whisper
-        from local_models.config import ASR_MODEL
-        asr_ok = Path(ASR_MODEL["local_path"]).is_dir()
-        lines.append(f"- ASR (Whisper): {'✅ 模型就绪' if asr_ok else '❌ 缺失 → ' + ASR_MODEL['local_path']}")
+        from local_models.config import ASR_CONFIG
+        asr_ok = Path(ASR_CONFIG["local_path"]).is_dir()
+        lines.append(f"- ASR (Whisper): {'✅ 模型就绪' if asr_ok else '❌ 缺失 → ' + ASR_CONFIG['local_path']}")
     except ImportError:
         lines.append("- ASR (Whisper): ❌ 未安装 (pip install faster-whisper)")
 
