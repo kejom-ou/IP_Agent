@@ -1,169 +1,115 @@
-# 本地模型改造模块（local_models）
+# 本地模型模块（local_models）
 
-## 概述
-
-本目录包含旗博士 AI 数字人项目的 **全本地化改造方案**，将原有依赖云端 API 的模型全部替换为可在本地运行的开源模型。
-
-## 改造目标
-
-| 原方案 | 问题 | 改造后 |
-|--------|------|--------|
-| DeepSeek 671B API | 需联网、需付费 API Key | Qwen2.5-3B 本地运行 |
-| CosyVoice（云服务） | 依赖外部服务 | CosyVoice-300M 本地 |
-| Whisper（云 ASR） | 需联网 | faster-whisper 本地 |
-| TuiliONNX | 闭源、资源占用大 | MuseTalk/Wav2Lip 开源 |
+全本地化 AI 数字人管线：**ASR → LLM → TTS → LipSync**，所有模型从本地 `pretrained_models/` 目录加载，无需联网。
 
 ## 目录结构
 
 ```
-local_models/
-├── __init__.py           # 模块入口
-├── config.py             # 配置中心（显存检测、模型分级、自动降级）
-├── adapter.py            # 统一适配器（桥接原 app.py 接口）
-├── asr_engine.py         # 语音识别引擎（faster-whisper）
-├── llm_engine.py         # 文案仿写引擎（Qwen2.5 + Ollama）
-├── tts_engine.py         # 语音合成引擎（CosyVoice-300M）
-├── lipsync.py            # 口型合成引擎（MuseTalk/Wav2Lip）
-├── model_downloader.py   # 一键模型下载器
-├── requirements.txt      # Python 依赖
-└── README.md             # 本文档
+IP_Agent/
+├── pretrained_models/              # 模型存放目录（需自行准备）
+│   ├── faster-whisper-small/       # ASR: faster-whisper-small（CPU）
+│   ├── Qwen2.5-0.5B-Instruct/      # LLM: Qwen2.5-0.5B（GPU）
+│   ├── CosyVoice-300M/             # TTS: CosyVoice-300M（GPU）
+│   └── MuseTalk/                   # LipSync: MuseTalk（GPU）
+└── local_models/
+    ├── config.py                   # 模型配置（本地路径 + 设备分配）
+    ├── asr_engine.py               # 语音识别（faster-whisper, CPU）
+    ├── llm_engine.py               # 文案仿写（Qwen2.5-0.5B + Transformers, GPU）
+    ├── tts_engine.py               # 语音合成（CosyVoice 纯本地推理, GPU）
+    ├── lipsync.py                  # 口型合成（MuseTalk, GPU）
+    ├── adapter.py                  # 与原 app.py 兼容的适配器
+    ├── model_downloader.py         # 本地模型状态检查
+    ├── pipeline_gradio.py          # Gradio Web 界面
+    ├── publisher.py                # 抖音自动发布（Playwright + CDP）
+    └── test_*.py                   # 单模块测试脚本
 ```
+
+## 设备分配
+
+| 环节 | 模型 | 设备 | 原因 |
+|------|------|------|------|
+| ASR | faster-whisper-small | **CPU** | 避免与 LLM/TTS 抢显存，CPU 足够处理 |
+| LLM | Qwen2.5-0.5B-Instruct | **GPU** | 推理需要 GPU 加速 |
+| TTS | CosyVoice-300M | **GPU** | 语音合成需 GPU |
+| LipSync | MuseTalk | **GPU** | 口型合成是显存/算力密集型 |
+
+## 模型说明
+
+| 环节 | 模型 | 本地路径 | 设备 | 必需 |
+|------|------|----------|------|------|
+| ASR | faster-whisper-small | `pretrained_models/faster-whisper-small/` | CPU | ✅ |
+| LLM | Qwen2.5-0.5B-Instruct | `pretrained_models/Qwen2.5-0.5B-Instruct/` | GPU | ✅ |
+| TTS | CosyVoice-300M | `pretrained_models/CosyVoice-300M/` | GPU | ✅ |
+| LipSync | MuseTalk | `pretrained_models/MuseTalk/` | GPU | 可选 |
 
 ## 快速开始
 
-### 1. 安装依赖
+### 1. 准备本地模型
+
+将所有模型文件放到 `pretrained_models/` 对应子目录下（参考上方目录结构）。
+
+### 2. 检查模型状态
 
 ```bash
-pip install -r local_models/requirements.txt
+python local_models/test_downloader.py
 ```
 
-### 2. 安装 Ollama（推荐）
+### 3. 启动 Gradio 界面
 
 ```bash
-# macOS/Linux
-curl -fsSL https://ollama.com/install.sh | sh
-
-# 拉取 Qwen 模型
-ollama pull qwen2.5:3b
+python local_models/pipeline_gradio.py
+# 访问 http://localhost:7861
 ```
 
-### 3. 下载模型
+## 单模块测试
 
 ```bash
-# 查看模型状态
-python local_models/model_downloader.py --check
-
-# 下载必需模型
-python local_models/model_downloader.py --essentials
-
-# 下载全部模型
-python local_models/model_downloader.py --all
+python local_models/test_asr.py      # 语音识别测试
+python local_models/test_llm.py      # LLM 仿写测试
+python local_models/test_tts.py      # 语音合成测试（SDK 模式）
+python local_models/test_lipsync.py  # 口型合成测试
+python local_models/test_pipeline.py --full  # 全流程测试
 ```
 
-### 4. 检查环境
+## 抖音自动发布
+
+`local_models/publisher.py` — 基于 Playwright + Chrome DevTools Protocol 实现。
+
+### 前置条件
 
 ```bash
-python local_models/adapter.py
+pip install playwright
+playwright install chromium
 ```
 
-输出示例：
-```
-============================================================
-🎯 本地模型适配方案 — GPU 显存：8 GB
-============================================================
-环节       模型                          显存(G)  量化
-------------------------------------------------------------
-语音识别    Whisper-ASR                   1.5      int8
-文案仿写    Qwen2.5-3B-Instruct           3.5      int4
-语音合成    CosyVoice-300M                2.0      fp16
-口型合成    MuseTalk                      4.0      fp16
-------------------------------------------------------------
-合计（串行加载） 峰值约                    11.0
-⚠️  所有模型分时加载，实际峰值 ≈ 4.0 GB
-============================================================
+### 启动 Chrome（调试模式）
+
+```bash
+# macOS
+open -a "Google Chrome" --args --remote-debugging-port=9222
+
+# Windows
+chrome.exe --remote-debugging-port=9222
 ```
 
-## 显存分级策略
-
-| 显卡 | ASR | LLM | TTS | 口型合成 |
-|------|-----|-----|-----|---------|
-| RTX 5060 8GB | Whisper small | Qwen2.5-3B (int4) | CosyVoice-300M | **MuseTalk** ⭐ |
-| RTX 3060 6GB | Whisper small | Qwen2.5-1.5B (int4) | CosyVoice-300M | Wav2Lip |
-| GTX 1050 4GB | Whisper tiny | Qwen2.5-0.5B (int4) | CosyVoice-300M | Wav2Lip Lite |
-| CPU only | Whisper tiny | Qwen2.5-1.5B (GGUF) | CosyVoice-300M | ❌ 不可用 |
-
-> **核心设计**：所有模型 **分时加载**，用完后立即释放显存。实际峰值显存 = 单个最大模型的显存（约 4GB）。
-
-## 口型合成方案对比
-
-| 方案 | 显存 | 画质 | 速度 | 适用 |
-|------|------|------|------|------|
-| **MuseTalk** ⭐ | ~4 GB | ⭐⭐⭐⭐⭐ | 30fps+ | 8GB+ 显卡 |
-| Wav2Lip | ~2.5 GB | ⭐⭐⭐⭐ | ~15fps | 6GB+ 显卡 |
-| Wav2Lip Lite | ~1.5 GB | ⭐⭐⭐ | ~10fps | 4GB+ 显卡 |
-
-**选择 MuseTalk 的理由**：
-- 腾讯音乐 Lyra Lab 开源，社区活跃
-- 在潜在空间中生成，口型精度更高
-- 官方实测 RTX 3050 Ti 4GB 可运行
-- 支持中文/英文/日语多语言
-- 实时推理（30fps+），画质优异
-
-## 在 app.py 中启用
-
-只需修改 import 语句即可切换：
+### 使用
 
 ```python
-# 原版（云端 API）
-# from utils.video_processor import download_and_extract_text
-# from ai_processing.text_rewriter import execute_rewrite, AI_write_descriptions
-# from video_tools.generate_video import generate_tuilionnx_video
-# from utils.voice_processor import handle_audio_creation, get_pt_files, ...
+from local_models.publisher import auto_publishing_videos_DY
 
-# 本地版
-from local_models.adapter import (
-    download_and_extract_text,
-    execute_rewrite,
-    AI_write_descriptions,
-    generate_tuilionnx_video,
-    handle_audio_creation,
-    get_pt_files,
-    generate_audio_only,
-    run_GPTvoice_command,
+result = auto_publishing_videos_DY(
+    video_path="/path/to/video.mp4",
+    title="视频标题",
+    pulish_with_cover=False,
 )
+print(result)  # "✅ 抖音发布成功"
 ```
 
-接口参数完全兼容，无需修改任何业务逻辑代码。
+## 关键设计
 
-## 各模型说明
-
-### 语音识别 — faster-whisper
-
-- **模型**: Systran/faster-whisper-small
-- **显存**: ~1.5 GB (int8)
-- **语言**: 支持 99 种语言，中文准确率 > 95%
-- **速度**: 比原版 Whisper 快 4 倍，显存省 38%
-- **功能**: 语音转文字 + 带时间戳的字幕生成
-
-### 文案仿写 — Qwen2.5
-
-- **模型**: Qwen2.5-3B-Instruct（阿里通义千问）
-- **显存**: ~3.5 GB (int4 量化)
-- **推理方式**: Ollama / llama.cpp
-- **功能**: AI 自动仿写、按指令仿写、视频描述生成
-
-### 语音合成 — CosyVoice-300M
-
-- **模型**: 阿里通义实验室 CosyVoice-300M-SFT
-- **显存**: ~2.0 GB
-- **功能**: 文字转语音 + 3 秒零样本声音克隆
-- **语言**: 中/英/日/粤/韩
-- **特色**: 情感控制、流式合成
-
-### 口型合成 — MuseTalk
-
-- **模型**: 腾讯音乐 Lyra Lab MuseTalk
-- **显存**: ~4.0 GB (fp16)
-- **功能**: 音频驱动的口型同步
-- **速度**: 实时推理 (30fps+)
-- **特点**: 潜在空间修复技术，高保真画质
+- **所有模型从本地 `pretrained_models/` 加载**，`config.py` 统一管理路径
+- **`local_files_only=True`** — LLM/ASR 拒绝联网下载
+- **LLM 固定使用 Qwen2.5-0.5B**（最小参数量）
+- **ASR 固定在 CPU**，LLM/TTS/LipSync 运行在 GPU
+- **TTS 纯本地推理** — 直接从本地 CosyVoice 目录加载，无需 API 服务
+- **抖音发布使用 Playwright + CDP** — 控制已登录 Chrome 自动发布

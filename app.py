@@ -55,7 +55,7 @@ from video_tools.subtitle_utils import (
     add_subtitles_to_video_with_style,
     FONT_FAMILIES,
 )
-from video_tools.publisher import (
+from local_models.publisher import (
     auto_publishing_videos_DY,
     auto_publishing_videos_XHS,
     auto_publishing_videos_SPH,
