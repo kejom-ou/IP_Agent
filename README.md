@@ -24,7 +24,18 @@ IP_Agent/
 
 ## 准备模型
 
-将所有模型放到 `pretrained_models/` 对应子目录：
+### 一键下载（推荐）
+
+```bash
+pip install modelscope
+python local_models/download_models.py
+```
+
+自动将 ASR、LLM、TTS、LipSync 全部下载到 `pretrained_models/`。
+
+### 手动准备
+
+将模型放到 `pretrained_models/` 对应子目录：
 
 | 模型 | 目录 | 设备 |
 |------|------|------|
