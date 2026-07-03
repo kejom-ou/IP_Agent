@@ -26,7 +26,7 @@ MODELS_DIR = ROOT_DIR / "pretrained_models"
 MODELS = [
     ("ASR: faster-whisper-small",       "iic/speech_faster_whisper_asr_zh_epoch3-small", "faster-whisper-small"),
     ("LLM: Qwen2.5-0.5B-Instruct",      "Qwen/Qwen2.5-0.5B-Instruct",                   "Qwen2.5-0.5B-Instruct"),
-    ("TTS: CosyVoice-300M",             "iic/CosyVoice-300M",                            "CosyVoice-300M"),
+    ("TTS: CosyVoice-300M-SFT (Lite)",  "iic/CosyVoice-300M-SFT",                       "CosyVoice-300M-SFT"),
     ("LipSync: MuseTalk",               "iic/MuseTalk",                                  "MuseTalk"),
 ]
 

@@ -5,13 +5,12 @@
 torch>=2.1.0
 transformers>=4.40.0
 
-# ---- 语音识别 ----
-faster-whisper>=1.0.0
+# ---- LLM INT4 量化（8GB 显存适配） ----
+# Windows 注意: bitsandbytes 对 Windows 支持不稳定，安装失败可跳过（LLM 自动回退 FP16）
+bitsandbytes>=0.43.0
 
-# ---- 语音合成（API 模式无需额外包） ----
-requests>=2.28.0
-
-# ---- 口型合成 ----
+# ---- 语音识别（FunASR SenseVoiceSmall） ----
+funasr>=1.0.0
 modelscope>=1.14.0
 
 # ---- 视频下载 ----

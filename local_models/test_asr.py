@@ -1,5 +1,5 @@
 """
-ASR 单项测试 — 使用本地 faster-whisper 模型
+ASR 单项测试 — 使用本地 SenseVoiceSmall 模型（FunASR AutoModel）
 """
 
 import os
@@ -13,7 +13,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 
-from local_models.asr_engine import WhisperASR
+from local_models.asr_engine import ASREngine
 
 if __name__ == "__main__":
     audio_file = input("音频文件路径: ").strip()
@@ -21,7 +21,7 @@ if __name__ == "__main__":
         print(f"❌ 文件不存在: {audio_file}")
         sys.exit(1)
 
-    asr = WhisperASR()
+    asr = ASREngine()
     if asr.load():
         text = asr.transcribe(audio_file)
         print(f"\n转写结果:\n{text}")

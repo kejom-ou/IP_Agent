@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class MuseTalkEngine:
-    """MuseTalk 口型合成 — 仅从本地目录加载，不联网下载（需 ~4GB 显存）"""
+    """MuseTalk 口型合成 — 仅从本地目录加载，不联网下载（需 ~6GB 显存）"""
 
     def __init__(self, local_path: str = None):
         self.local_path = local_path or LIPSYNC_CONFIG["local_path"]

@@ -9,9 +9,12 @@
 使用方法:
     python local_models/pipeline_gradio.py
 
-自动根据显存选择模型：
-  - LLM: Qwen2.5-1.5B CPU（不占用 GPU 显存）
-  - LipSync: MuseTalk（强制高画质）
+8GB 显存适配策略（串行加载）：
+  - ASR 固定在 CPU（~2GB 内存）
+  - LLM INT4 量化（~0.5GB 显存），用后卸载
+  - TTS Lite（~1-2GB 显存），用后卸载
+  - LipSync（~6GB 显存），最后加载
+  → 峰值显存 ~6GB ✅
 ============================================================
 """
 
@@ -38,21 +41,22 @@ logger = logging.getLogger("pipeline")
 
 
 # ===========================================================================
-# 单例引擎管理（避免重复加载模型）
+# 单例引擎管理（8GB 显存：串行加载/卸载）
 # ===========================================================================
 
-_whisper_engine = None
+_asr_engine = None
 _llm_engine = None
+_tts_engine = None
 _lipsync_engine = None
 
 
-def _get_whisper():
-    global _whisper_engine
-    if _whisper_engine is None:
-        from local_models.asr_engine import WhisperASR
-        _whisper_engine = WhisperASR()
-        _whisper_engine.load()
-    return _whisper_engine
+def _get_asr():
+    global _asr_engine
+    if _asr_engine is None:
+        from local_models.asr_engine import ASREngine
+        _asr_engine = ASREngine()
+        _asr_engine.load()
+    return _asr_engine
 
 
 def _get_llm():
@@ -64,6 +68,33 @@ def _get_llm():
     return _llm_engine
 
 
+def _unload_llm():
+    """卸载 LLM，释放 ~0.5GB 显存给 TTS"""
+    global _llm_engine
+    if _llm_engine:
+        _llm_engine.unload()
+        _llm_engine = None
+        logger.info("[显存管理] LLM 已卸载")
+
+
+def _get_tts():
+    global _tts_engine
+    if _tts_engine is None:
+        from local_models.tts_engine import CosyVoiceEngine
+        _tts_engine = CosyVoiceEngine()
+        _tts_engine.load_model()
+    return _tts_engine
+
+
+def _unload_tts():
+    """卸载 TTS，释放 ~1-2GB 显存给 LipSync"""
+    global _tts_engine
+    if _tts_engine:
+        _tts_engine.unload()
+        _tts_engine = None
+        logger.info("[显存管理] TTS 已卸载")
+
+
 def _get_lipsync():
     global _lipsync_engine
     if _lipsync_engine is None:
@@ -71,6 +102,15 @@ def _get_lipsync():
         _lipsync_engine = MuseTalkEngine()
         _lipsync_engine.load()
     return _lipsync_engine
+
+
+def _unload_lipsync():
+    """卸载 LipSync"""
+    global _lipsync_engine
+    if _lipsync_engine:
+        _lipsync_engine.unload()
+        _lipsync_engine = None
+        logger.info("[显存管理] LipSync 已卸载")
 
 
 # ===========================================================================
@@ -124,9 +164,9 @@ def step1_extract_text(file_obj) -> Tuple[str, str]:
             except FileNotFoundError:
                 return "", "❌ FFmpeg 未安装 → https://ffmpeg.org/download.html"
 
-        # Whisper 转写
+        # ASR 转写
         try:
-            asr = _get_whisper()
+            asr = _get_asr()
             text = asr.transcribe(audio_path)
             if text:
                 logger.info(f"[ASR] 提取完成，{len(text)} 字符")
@@ -144,7 +184,7 @@ def step1_extract_text(file_obj) -> Tuple[str, str]:
 
 def step2_rewrite(text: str, ai_mode: str, custom_prompt: str) -> Tuple[str, str]:
     """
-    使用本地 Qwen2.5 模型对文案进行 AI 仿写。
+    使用本地 Qwen2.5 模型对文案进行 AI 仿写（INT4 量化，~0.5GB 显存）。
     """
     if not text or not text.strip():
         return "", "❌ 请先提取文案"
@@ -159,11 +199,15 @@ def step2_rewrite(text: str, ai_mode: str, custom_prompt: str) -> Tuple[str, str
             mode=ai_mode,
             custom_prompt=prompt,
         )
+        # 用后立即卸载，释放显存给 TTS
+        _unload_llm()
+
         if result and result != text:
             return result, f"✅ 仿写完成，{len(result)} 字符"
         else:
             return text, "⚠️ 仿写未生效，使用原文"
     except Exception as e:
+        _unload_llm()
         logger.error(f"[LLM] 仿写失败: {e}")
         return text, f"❌ 仿写失败: {e}"
 
@@ -174,22 +218,26 @@ def step2_rewrite(text: str, ai_mode: str, custom_prompt: str) -> Tuple[str, str
 
 def step3_generate_audio(text: str, speed: float) -> Tuple[Optional[str], str]:
     """
-    使用 CosyVoice（纯本地推理，从本地模型加载）将文案合成为语音。
+    使用 CosyVoice Lite 将文案合成为语音（~1-2GB 显存）。
+    合成完成后自动卸载，释放显存给 LipSync。
     """
     if not text or not text.strip():
         return None, "❌ 文案为空"
 
+    # 确保 LLM 已卸载，释放显存
+    _unload_llm()
+
     logger.info(f"[TTS] 合成语音，语速={speed}")
 
     try:
-        from local_models.tts_engine import CosyVoiceEngine
-
-        engine = CosyVoiceEngine()
+        engine = _get_tts()
         audio_path = engine.synthesize(
             text=text,
             speaker="default",
             speed=speed,
         )
+        # 用后立即卸载，释放显存给 LipSync
+        _unload_tts()
 
         if audio_path and os.path.exists(audio_path):
             duration = _get_audio_duration(audio_path)
@@ -197,6 +245,7 @@ def step3_generate_audio(text: str, speed: float) -> Tuple[Optional[str], str]:
         else:
             return None, "❌ 语音合成失败"
     except Exception as e:
+        _unload_tts()
         logger.error(f"[TTS] 合成失败: {e}")
         return None, f"❌ 合成失败: {e}"
 
@@ -221,12 +270,15 @@ def _get_audio_duration(path: str) -> float:
 
 def step4_lipsync(video_path, audio_path) -> Tuple[Optional[str], str]:
     """
-    使用 MuseTalk 将音频驱动的口型同步到视频上。
+    使用 MuseTalk 将音频驱动的口型同步到视频上（~6GB 显存）。
     """
     if video_path is None:
         return None, "❌ 缺少视频输入"
     if audio_path is None:
         return None, "❌ 缺少音频输入"
+
+    # 确保 TTS 已卸载，释放显存
+    _unload_tts()
 
     vp = video_path if isinstance(video_path, str) else video_path.name
     ap = audio_path if isinstance(audio_path, str) else audio_path.name
@@ -268,8 +320,8 @@ def run_full_pipeline(
     progress=gr.Progress(),
 ):
     """
-    一键执行完整管线：
-      ASR → LLM → TTS → LipSync
+    一键执行完整管线（串行加载/卸载，8GB 显存适配）：
+      ASR(CPU) → LLMINT4(0.5GB)→卸载 → TTS(4GB)→卸载 → LipSync(6GB)
     """
     if input_video is None:
         return None, "", "", None, "❌ 请先上传视频"
@@ -282,19 +334,19 @@ def run_full_pipeline(
     if not text:
         return None, text, "❌ 管线中断：文案提取失败", None, status1
 
-    progress(0.30, desc="步骤 2/4: AI 仿写文案...")
+    progress(0.30, desc="步骤 2/4: AI 仿写文案 (INT4)...")
     rewritten, status2 = step2_rewrite(text, ai_mode, custom_prompt)
     yield None, rewritten, f"{status1}\n{status2}", None, ""
     if not rewritten:
         return None, text, "❌ 管线中断：仿写失败", None, f"{status1}\n{status2}"
 
-    progress(0.55, desc="步骤 3/4: 合成语音...")
+    progress(0.55, desc="步骤 3/4: 合成语音（释放 LLM 显存）...")
     audio_path, status3 = step3_generate_audio(rewritten, speed)
     yield None, rewritten, f"{status1}\n{status2}\n{status3}", audio_path, ""
     if not audio_path:
         return None, rewritten, "❌ 管线中断：语音合成失败", None, f"{status1}\n{status2}\n{status3}"
 
-    progress(0.75, desc="步骤 4/4: 生成口型同步视频...")
+    progress(0.75, desc="步骤 4/4: 生成口型同步视频（释放 TTS 显存）...")
     video_path, status4 = step4_lipsync(file_path, audio_path)
     yield video_path, rewritten, f"{status1}\n{status2}\n{status3}\n{status4}", audio_path, ""
 
@@ -321,14 +373,14 @@ def check_environment() -> str:
     except ImportError:
         lines.append("- GPU: ❌ PyTorch 未安装")
 
-    # Whisper
+    # ASR (SenseVoiceSmall)
     try:
-        import faster_whisper
+        import funasr
         from local_models.config import ASR_CONFIG
         asr_ok = Path(ASR_CONFIG["local_path"]).is_dir()
-        lines.append(f"- ASR (Whisper): {'✅ 模型就绪' if asr_ok else '❌ 缺失 → ' + ASR_CONFIG['local_path']}")
+        lines.append(f"- ASR (SenseVoiceSmall): {'✅ 模型就绪' if asr_ok else '❌ 缺失 → ' + ASR_CONFIG['local_path']}")
     except ImportError:
-        lines.append("- ASR (Whisper): ❌ 未安装 (pip install faster-whisper)")
+        lines.append("- ASR (SenseVoiceSmall): ❌ funasr 未安装 (pip install funasr)")
 
     # LLM
     try:
@@ -389,7 +441,7 @@ def create_pipeline_ui():
 
         gr.Markdown("""
         # 🎬 旗博士 AI 追爆管线
-        **全本地化方案** | ASR → LLM → TTS → LipSync | Qwen2.5-1.5B CPU | MuseTalk
+        **全本地化方案** | ASR → LLM(INT4) → TTS → LipSync | 8GB 显存友好
         """)
 
         # ---- 环境状态 ----

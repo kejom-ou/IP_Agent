@@ -1,19 +1,19 @@
 # 本地模型模块（local_models）
 
-全本地化 AI 数字人管线：**ASR → LLM → TTS → LipSync**。ASR/TTS/LipSync 统一使用 ModelScope pipeline 加载，LLM 使用 Transformers 原生推理，所有模型从本地 `pretrained_models/` 目录加载，无需联网。
+全本地化 AI 数字人管线：**ASR → LLM → TTS → LipSync**。TTS/LipSync 使用 ModelScope pipeline 加载，ASR 使用 FunASR AutoModel (SenseVoiceSmall)，LLM 使用 Transformers 原生推理（INT4 量化），所有模型从本地 `pretrained_models/` 目录加载，无需联网。**串行加载 8GB 显存适配**。
 
 ## 目录结构
 
 ```
 IP_Agent/
 ├── pretrained_models/              # 模型存放目录（需自行准备）
-│   ├── faster-whisper-small/       # ASR: faster-whisper-small（CPU）
-│   ├── Qwen2.5-0.5B-Instruct/      # LLM: Qwen2.5-0.5B（GPU）
-│   ├── CosyVoice-300M/             # TTS: CosyVoice-300M（GPU）
+│   ├── SenseVoiceSmall/             # ASR: SenseVoiceSmall（CPU）
+│   ├── Qwen2.5-0.5B-Instruct/      # LLM: Qwen2.5-0.5B（GPU, INT4）
+│   ├── CosyVoice-300M-SFT/         # TTS: CosyVoice Lite (~1-2GB 显存)
 │   └── MuseTalk/                   # LipSync: MuseTalk（GPU）
 └── local_models/
     ├── config.py                   # 模型配置（本地路径 + 设备分配）
-    ├── asr_engine.py               # 语音识别（faster-whisper, CPU）
+    ├── asr_engine.py               # 语音识别（SenseVoiceSmall, CPU）
     ├── llm_engine.py               # 文案仿写（Qwen2.5-0.5B + Transformers, GPU）
     ├── tts_engine.py               # 语音合成（CosyVoice 纯本地推理, GPU）
     ├── lipsync.py                  # 口型合成（MuseTalk, GPU）
@@ -28,21 +28,34 @@ IP_Agent/
 
 | 环节 | 模型 | 设备 | 原因 |
 |------|------|------|------|
-| ASR | faster-whisper-small | **CPU** | 避免与 LLM/TTS 抢显存，CPU 足够处理 |
-| LLM | Qwen2.5-0.5B-Instruct | **GPU** | 推理需要 GPU 加速 |
-| TTS | CosyVoice-300M | **GPU** | 语音合成需 GPU |
-| LipSync | MuseTalk | **GPU** | 口型合成是显存/算力密集型 |
+| ASR | SenseVoiceSmall | **CPU** | 与 GPU 模型无冲突，CPU 足够处理 |
+| LLM | Qwen2.5-0.5B-Instruct (INT4) | **GPU** | INT4 量化仅 ~0.5GB，用后卸载 |
+| TTS | CosyVoice-300M-SFT (Lite) | **GPU** | ~1-2GB，LLM 卸载后加载 |
+| LipSync | MuseTalk | **GPU** | ~6GB，TTS 卸载后加载 |
+| **峰值** | — | **GPU** | **~6 GB**（串行，适配 8GB 显卡） |
+
+### 资源占用
+
+| 模型 | 磁盘 | 参数量 | CPU 内存 | GPU 显存 | 推理速度 |
+|------|------|--------|----------|----------|----------|
+| SenseVoiceSmall | ~0.9 GB | 234M | ~2 GB | — | 170x 实时（10s 音频 → 70ms） |
+| Qwen2.5-0.5B-Instruct (INT4) | ~1.0 GB | 494M | — | ~0.5 GB | 取决于生成长度 |
+| CosyVoice-300M-SFT (Lite) | ~5.5 GB | 300M | — | ~1-2 GB (fp16) | 接近实时 |
+| MuseTalk | ~6.0 GB | — | — | ~6 GB（单张人脸） | 30+ fps (V100) |
+| **总计（串行）** | **~13.4 GB** | **~1B** | **~2 GB** | **~6 GB 峰值** ✅ | — |
+
+> **8GB 显存策略**：串行加载/卸载 — ASR(CPU) → LLM INT4(~0.5GB) → 卸载 → TTS Lite(~1-2GB) → 卸载 → LipSync(~6GB)。
 
 ## 模型说明
 
 | 环节 | 模型 | 本地路径 | 设备 | 必需 |
 |------|------|----------|------|------|
-| ASR | faster-whisper-small | `pretrained_models/faster-whisper-small/` | CPU | ✅ |
+| ASR | SenseVoiceSmall | `pretrained_models/SenseVoiceSmall/` | CPU | ✅ |
 | LLM | Qwen2.5-0.5B-Instruct | `pretrained_models/Qwen2.5-0.5B-Instruct/` | GPU | ✅ |
-| TTS | CosyVoice-300M | `pretrained_models/CosyVoice-300M/` | GPU | ✅ |
+| TTS | CosyVoice-300M-SFT (Lite) | `pretrained_models/CosyVoice-300M-SFT/` | GPU | ✅ |
 | LipSync | MuseTalk | `pretrained_models/MuseTalk/` | GPU | 可选 |
 
-> ASR/TTS/LipSync 使用 ModelScope pipeline 加载；LLM 使用 Transformers 原生推理（ModelScope pipeline 不支持 chat template）。
+> ASR 使用 FunASR AutoModel (SenseVoiceSmall) 加载；TTS/LipSync 使用 ModelScope pipeline 加载；LLM 使用 Transformers 原生推理。
 
 ## 快速开始
 
@@ -109,10 +122,9 @@ print(result)  # "✅ 抖音发布成功"
 
 ## 关键设计
 
-- **ASR/TTS/LipSync 统一使用 ModelScope pipeline** — 单一接口加载，代码简洁统一
-- **LLM 使用 Transformers 原生推理** — ModelScope pipeline 不支持 chat template，保留原生方案
+- **LLM INT4 量化**（bitsandbytes NF4）— Qwen2.5-0.5B 仅 ~0.5GB 显存
+- **串行加载/卸载** — ASR(CPU) → LLM → 卸载 → TTS → 卸载 → LipSync，峰值 ~6GB，适配 8GB 显卡
+- **TTS 使用 fp16 dtype** — CosyVoice Lite 以 `torch_dtype=torch.float16` 加载，显存降至 ~1-2GB
 - **所有模型从本地 `pretrained_models/` 加载**，`config.py` 统一管理路径
 - **`local_files_only=True`** — LLM/ASR 拒绝联网下载
-- **LLM 固定使用 Qwen2.5-0.5B**（最小参数量）
-- **ASR 固定在 CPU**，LLM/TTS/LipSync 运行在 GPU
-- **抖音发布使用 Playwright + CDP** — 控制已登录 Chrome 自动发布
+- **ASR 固定在 CPU**，GPU 模型串行使用

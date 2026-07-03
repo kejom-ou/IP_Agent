@@ -41,12 +41,12 @@ def check_environment() -> dict:
     except ImportError:
         env["GPU"] = "❌ PyTorch 未安装"
 
-    # ASR
+    # ASR (SenseVoiceSmall)
     try:
-        import faster_whisper
-        env["ASR"] = "✅ faster-whisper"
+        import funasr
+        env["ASR"] = f"✅ FunASR SenseVoiceSmall {funasr.__version__}"
     except ImportError:
-        env["ASR"] = "❌ faster-whisper 未安装"
+        env["ASR"] = "❌ funasr 未安装 → pip install funasr"
 
     # LLM
     try:
@@ -83,7 +83,7 @@ def check_environment() -> dict:
 
 def step_asr(video_path: str) -> str:
     """ASR：从视频提取音频并转写"""
-    from local_models.asr_engine import WhisperASR
+    from local_models.asr_engine import ASREngine
 
     audio_path = tempfile.mktemp(suffix=".wav")
     subprocess.run([
@@ -93,7 +93,7 @@ def step_asr(video_path: str) -> str:
         audio_path, "-y", "-loglevel", "error",
     ], check=True, timeout=30)
 
-    asr = WhisperASR()
+    asr = ASREngine()
     asr.load()
     text = asr.transcribe(audio_path)
     asr.unload()
@@ -105,7 +105,7 @@ def step_asr(video_path: str) -> str:
 
 
 def step_llm(text: str) -> str:
-    """LLM：文案仿写"""
+    """LLM：文案仿写（INT4 量化）"""
     from local_models.llm_engine import LocalLLMEngine
 
     engine = LocalLLMEngine()
@@ -113,16 +113,21 @@ def step_llm(text: str) -> str:
         raise RuntimeError("LLM 模型加载失败")
 
     result = engine.rewrite(text, mode="AI自动仿写")
+    # 立即卸载，释放显存给 TTS
+    engine.unload()
     return result if result != text else text
 
 
 def step_tts(text: str) -> str:
-    """TTS：语音合成（纯本地推理，从本地加载模型），返回音频文件路径"""
+    """TTS：语音合成，返回音频文件路径"""
     from local_models.tts_engine import CosyVoiceEngine
 
     engine = CosyVoiceEngine()
+    engine.load_model()
     output = tempfile.mktemp(suffix=".wav")
     result = engine.synthesize(text=text, speaker="default", speed=1.0, output_path=output)
+    # 立即卸载，释放显存给 LipSync
+    engine.unload()
     if not result:
         raise RuntimeError("CosyVoice 合成失败")
     return output

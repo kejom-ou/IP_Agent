@@ -20,7 +20,7 @@ MODELS = [
     ("LLM — Qwen2.5-0.5B-Instruct", "Qwen2.5-0.5B-Instruct", True),
     ("LLM — Qwen2.5-1.5B-Instruct", "Qwen2.5-1.5B-Instruct", False),
     ("LLM — Qwen2.5-3B-Instruct",   "Qwen2.5-3B-Instruct",   False),
-    ("TTS — CosyVoice-300M",        "CosyVoice-300M",         True),
+    ("TTS — CosyVoice-300M-SFT (Lite)", "CosyVoice-300M-SFT",  True),
     ("LipSync — MuseTalk",          "MuseTalk",               False),
 ]
 

@@ -4,6 +4,7 @@
 
 import gc
 import logging
+import os
 import tempfile
 import numpy as np
 from pathlib import Path
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 class CosyVoiceEngine:
-    """CosyVoice TTS 引擎 — ModelScope pipeline + 本地模型"""
+    """CosyVoice-300M-SFT (Lite) TTS 引擎 — ModelScope pipeline + 本地模型，仅 ~1-2GB 显存"""
 
     def __init__(self, local_path: str = None):
         self.model_path = local_path or TTS_CONFIG["local_path"]
@@ -31,27 +32,32 @@ class CosyVoiceEngine:
     # ---- 模型加载 ----
 
     def load_model(self) -> bool:
-        """从本地目录加载 CosyVoice 模型（GPU）"""
+        """从本地目录加载 CosyVoice-300M-SFT Lite 模型（GPU，~1-2GB 显存）"""
         try:
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             else:
-                logger.warning("⚠️ 未检测到 CUDA，CosyVoice 将在 CPU 上运行（较慢）")
+                logger.warning("⚠️ 未检测到 CUDA，CosyVoice Lite 将在 CPU 上运行（较慢）")
 
-            logger.info(f"加载 CosyVoice pipeline 从: {self.model_path}")
-            self.pipeline = pipeline(
-                task=Tasks.text_to_speech,
-                model=self.model_path,
-                device=self.device,
-            )
-            logger.info(f"CosyVoice pipeline 加载完成 (GPU={torch.cuda.is_available()})")
+            logger.info(f"加载 CosyVoice Lite pipeline 从: {self.model_path}")
+            pipeline_kwargs = {
+                "task": Tasks.text_to_speech,
+                "model": self.model_path,
+                "device": self.device,
+            }
+            # fp16 仅在 GPU 可用时启用，CPU 不支持
+            if self.device == "cuda":
+                pipeline_kwargs["torch_dtype"] = torch.float16
+            self.pipeline = pipeline(**pipeline_kwargs)
+            dtype_info = "fp16" if self.device == "cuda" else "fp32"
+            logger.info(f"CosyVoice Lite pipeline 加载完成 (GPU={torch.cuda.is_available()}, dtype={dtype_info})")
             return True
         except ImportError:
             logger.error("modelscope 未安装 → pip install modelscope")
             return False
         except Exception as e:
-            logger.error(f"CosyVoice 加载失败: {e}")
+            logger.error(f"CosyVoice Lite 加载失败: {e}")
             return False
 
     # ---- 推理 ----
@@ -65,7 +71,8 @@ class CosyVoiceEngine:
             return None
 
         if output_path is None:
-            output_path = tempfile.mktemp(suffix=".wav")
+            fd, output_path = tempfile.mkstemp(suffix=".wav")
+            os.close(fd)
 
         try:
             result = self.pipeline(input=text, spk_id=speaker, speed=speed)

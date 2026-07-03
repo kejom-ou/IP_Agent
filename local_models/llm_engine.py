@@ -1,5 +1,6 @@
 """
 本地 LLM 引擎 — Transformers 原生推理 Qwen2.5（从本地加载模型）
+支持 INT4 量化（bitsandbytes），显存仅 ~0.5GB
 """
 
 import gc
@@ -14,6 +15,14 @@ from local_models.config import get_llm_model
 
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", category=FutureWarning)
+
+# bitsandbytes INT4 量化（可选，无此包则回退 FP16）
+try:
+    from transformers import BitsAndBytesConfig
+    HAS_BNB = True
+except ImportError:
+    HAS_BNB = False
+    logger.info("bitsandbytes 未安装，LLM 将使用 FP16（~2GB 显存）")
 
 # ---------------------------------------------------------------------------
 # 系统提示词
@@ -35,13 +44,14 @@ SYSTEM_PROMPT_CUSTOM = """你是一个专业的口播文案改写助手。请严
 # ---------------------------------------------------------------------------
 
 class TransformersLLM:
-    """基于 HuggingFace Transformers 的原生推理 — 仅从本地路径加载"""
+    """基于 HuggingFace Transformers 的原生推理 — 仅从本地路径加载，支持 INT4"""
 
     def __init__(self, local_path: str = None):
         cfg = get_llm_model()
         self.local_path = local_path or cfg["local_path"]
         self.model_name = cfg["name"]
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"  # LLM 优先 GPU
+        self.quantization = cfg.get("quantization", "fp16")
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model = None
         self.tokenizer = None
 
@@ -61,19 +71,41 @@ class TransformersLLM:
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
 
-            torch_dtype = torch.float16 if self.device == "cuda" else torch.float32
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.local_path,
-                torch_dtype=torch_dtype,
-                device_map="auto",
-                trust_remote_code=True,
-                local_files_only=True,
-                attn_implementation="sdpa",
-            )
+            # INT4 量化（bitsandbytes）
+            if self.device == "cuda" and self.quantization == "int4" and HAS_BNB:
+                quant_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_quant_type="nf4",
+                )
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    self.local_path,
+                    quantization_config=quant_config,
+                    device_map="auto",
+                    trust_remote_code=True,
+                    local_files_only=True,
+                    attn_implementation="sdpa",
+                )
+                quant_tag = "INT4"
+            else:
+                # FP16 (GPU) / FP32 (CPU) 回退
+                torch_dtype = torch.float16 if self.device == "cuda" else torch.float32
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    self.local_path,
+                    torch_dtype=torch_dtype,
+                    device_map="auto",
+                    trust_remote_code=True,
+                    local_files_only=True,
+                    attn_implementation="sdpa",
+                )
+                quant_tag = f"FP16" if self.device == "cuda" else "FP32"
+
             self.model.eval()
 
             params_b = sum(p.numel() for p in self.model.parameters()) / 1e9
-            logger.info(f"模型加载完成 ({params_b:.1f}B 参数, {self.device})")
+            vram_mb = torch.cuda.memory_allocated() / (1024**2) if self.device == "cuda" else 0
+            logger.info(f"模型加载完成 ({params_b:.2f}B 参数, {quant_tag}, GPU={vram_mb:.0f}MB, {self.device})")
             return True
         except Exception as e:
             logger.error(f"模型加载失败: {e}")

@@ -7,7 +7,7 @@
 import logging
 from typing import Optional, List, Tuple
 
-from local_models.asr_engine import WhisperASR
+from local_models.asr_engine import ASREngine
 from local_models.llm_engine import LocalLLMEngine
 from local_models.tts_engine import CosyVoiceEngine, get_pt_files_local
 
@@ -44,7 +44,7 @@ def download_and_extract_text(video_url: str) -> str:
             logger.error(f"音频提取失败: {e}")
             return ""
 
-        asr = WhisperASR()
+        asr = ASREngine()
         if not asr.load():
             return ""
         text = asr.transcribe(audio_path)

@@ -45,9 +45,9 @@ LLM_CONFIG = {
     "local_path": str(LOCAL_MODELS_DIR / "Qwen2.5-0.5B-Instruct"),
 }
 
-# TTS — ModelScope pipeline，本地 CosyVoice 模型
+# TTS — ModelScope pipeline，本地 CosyVoice Lite 模型（~1-2GB 显存）
 TTS_CONFIG = {
-    "local_path": str(LOCAL_MODELS_DIR / "CosyVoice-300M"),
+    "local_path": str(LOCAL_MODELS_DIR / "CosyVoice-300M-SFT"),
 }
 
 # LipSync — ModelScope pipeline，本地 MuseTalk 模型
