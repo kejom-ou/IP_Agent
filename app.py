@@ -59,9 +59,8 @@ from local_models.publisher import (
     auto_publishing_videos_DY,
     auto_publishing_videos_XHS,
     auto_publishing_videos_SPH,
-    auto_publishing_videos_ALL,
-    auto_publishing_videos_DY_ALL,
 )
+from local_models.adapter import AI_generate_publish_content
 
 # 配置日志
 logging.basicConfig(
@@ -110,6 +109,322 @@ def cancel_update():
         tuple: 状态信息和对话框可见性更新
     """
     return ("用户取消更新", gr.update(visible=False))
+
+
+def _resolve_bgm_path(bgm_dropdown_name: str, user_upload_bgm_path: str) -> str:
+    """解析 BGM 文件路径（优先用户上传，其次下拉选择）"""
+    # 优先用户上传的文件
+    if user_upload_bgm_path and os.path.exists(user_upload_bgm_path):
+        return user_upload_bgm_path
+    # 从下拉列表中查找对应的路径
+    if bgm_dropdown_name:
+        for name, path in get_bgm_list():
+            if name == bgm_dropdown_name and os.path.exists(path):
+                return path
+    return ""
+
+
+def generate_video_preview(
+    video_path: str,
+    subtitle_text: str,
+    font_family: str,
+    font_size: int,
+    font_color: str,
+    outline_color: str,
+    bottom_margin: int,
+) -> str:
+    """从视频中提取一帧并叠加字幕样式，生成预览图
+
+    流程:
+      ① OpenCV 读取视频 → 定位到中间帧（约第 2 秒处）
+      ② PIL 在画面上根据字幕样式渲染字幕文本
+      ③ 保存为临时 PNG 预览图 → 返回路径
+
+    Args:
+        video_path: 视频文件路径
+        subtitle_text: 字幕文本内容（取前 30 字展示）
+        font_family: 字幕字体名称
+        font_size: 字号
+        font_color: 字体颜色（#RRGGBB）
+        outline_color: 描边颜色（#RRGGBB）
+        bottom_margin: 底部边距（px）
+
+    Returns:
+        预览图文件路径
+    """
+    import tempfile
+    from PIL import Image, ImageDraw, ImageFont
+
+    if not video_path or not os.path.exists(video_path):
+        return None
+
+    # ── ① 提取视频帧 ──
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return None
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    # 定位到第 2 秒左右的帧（有画面的概率高，避免全黑开场帧）
+    target_frame = min(int(2.0 * fps) if fps > 0 else total_frames // 3, total_frames - 1)
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+    ret, frame_bgr = cap.read()
+    if not ret:
+        # 回退：读第一帧
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        ret, frame_bgr = cap.read()
+    cap.release()
+
+    if not ret or frame_bgr is None:
+        return None
+
+    # BGR → RGB → PIL
+    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+    pil_img = Image.fromarray(frame_rgb)
+    draw = ImageDraw.Draw(pil_img)
+    img_w, img_h = pil_img.size
+
+    # ── ② 加载字体 ──
+    try:
+        font = ImageFont.truetype(font_family, font_size)
+    except Exception:
+        # 回退：尝试 PIL 默认字体路径，或使用默认字体
+        try:
+            # macOS/Linux 常见中文字体路径
+            fallback_fonts = [
+                "/System/Library/Fonts/PingFang.ttc",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "C:\\Windows\\Fonts\\msyh.ttc",
+                "C:\\Windows\\Fonts\\simhei.ttf",
+            ]
+            font = None
+            for fp in fallback_fonts:
+                if os.path.exists(fp):
+                    font = ImageFont.truetype(fp, font_size)
+                    break
+            if font is None:
+                font = ImageFont.load_default()
+        except Exception:
+            font = ImageFont.load_default()
+
+    # ── ③ 处理字幕文本（去换行，限制长度） ──
+    display_text = subtitle_text.replace("\n", " ").strip()
+    if len(display_text) > 40:
+        display_text = display_text[:40] + "..."
+
+    if not display_text:
+        display_text = "（字幕预览：暂无文本）"
+
+    # ── ④ 文字测量与居中 ──
+    bbox = draw.textbbox((0, 0), display_text, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+    x = (img_w - text_w) // 2
+    y = img_h - bottom_margin - text_h
+
+    # ── ⑤ 描边渲染（模拟 outline 效果：8 个方向偏移绘制） ──
+    outline_offsets = [
+        (-1, -1), (0, -1), (1, -1),
+        (-1,  0),          (1,  0),
+        (-1,  1), (0,  1), (1,  1),
+    ]
+    for dx, dy in outline_offsets:
+        draw.text((x + dx, y + dy), display_text, font=font, fill=outline_color)
+
+    # ── ⑥ 主文字渲染 ──
+    draw.text((x, y), display_text, font=font, fill=font_color)
+
+    # ── ⑦ 保存为临时文件 ──
+    fd, preview_path = tempfile.mkstemp(suffix=".png", prefix="video_preview_")
+    os.close(fd)
+    pil_img.save(preview_path, "PNG")
+    logging.info(f"预览图已生成: {preview_path}")
+    return preview_path
+
+
+def auto_publish_dy_with_llm(
+    video_path: str,
+    script_text: str,
+    bgm_dropdown: str,
+    user_upload_bgm: str,
+    pulish_with_cover: bool,
+) -> str:
+    """一键发布到抖音（自动调用 LLM 生成标题/文案/标签）
+
+    流程：
+    1. LLM 根据脚本生成 { title, description, tags }
+    2. 解析用户选择的 BGM 路径
+    3. 自动填入抖音发布页并发布
+    """
+    if not video_path:
+        return "❌ 请先生成视频"
+
+    # Step 1: LLM 生成标题、描述、标签
+    content = AI_generate_publish_content(script_text)
+    title = content.get("title", "") or script_text[:20]
+    description = content.get("description", "")
+    tags = content.get("tags", [])
+
+    logging.info(f"LLM 生成 — 标题: {title}")
+    logging.info(f"LLM 生成 — 描述: {description}")
+    logging.info(f"LLM 生成 — 标签: {tags}")
+
+    # Step 2: 解析 BGM
+    bgm_path = _resolve_bgm_path(bgm_dropdown, user_upload_bgm)
+
+    # Step 3: 发布
+    return auto_publishing_videos_DY(
+        video_path=video_path,
+        title=title,
+        description=description,
+        tags=tags,
+        bgm_path=bgm_path,
+        pulish_with_cover=pulish_with_cover,
+    )
+
+
+def auto_full_pipeline(
+    link_input: str,
+    pt_file_dropdown: str,
+    face_model: str,
+    speed: float,
+    bgm_list: str,
+    user_upload_bgm: str,
+    bgm_volume_control: float,
+    pulish_with_cover: bool,
+    skip_bgm_add_box: bool,
+    # ── 字幕参数（默认值适配抖音/短视频场景）────
+    subtitle_font: str = "Microsoft YaHei",
+    subtitle_size: int = 11,
+    subtitle_color: str = "#FFFFFF",
+    subtitle_outline: str = "#000000",
+    subtitle_margin: int = 60,
+) -> str:
+    """一键追爆款并发布到抖音（完整自动化流程）
+
+    流程:
+      ① 下载抖音视频 → 提取口播文案（yt-dlp + ASR）
+      ② TTS 语音合成（CosyVoice）
+      ③ 数字人口型合成（MuseTalk）
+      ④ 嵌入字幕（自动语音识别 + 样式渲染）
+      ⑤ 添加背景音乐（可选）
+      ⑥ LLM 生成标题/描述/标签 + Playwright 自动发布
+
+    Returns:
+        每步状态汇总文本
+    """
+    results = []
+
+    # ================================================================
+    # Step 1: 下载视频 + 提取文案
+    # ================================================================
+    if not link_input:
+        return "❌ 请先输入抖音视频分享链接"
+
+    logging.info(f"📥 开始下载并提取文案: {link_input[:80]}...")
+    text = download_and_extract_text(link_input)
+    if not text:
+        return "❌ 视频下载或文案提取失败，请检查链接是否正确（需支持 yt-dlp）"
+    results.append(f"✅ [1/6] 文案提取成功 ({len(text)} 字)")
+    logging.info(f"📝 提取文案: {text[:50]}...")
+
+    # ================================================================
+    # Step 2: TTS 语音合成
+    # ================================================================
+    logging.info("🔊 开始语音合成...")
+    audio_path, audio_status = handle_audio_creation(text, pt_file_dropdown, speed)
+    if not audio_path:
+        results.append("❌ [2/6] TTS 语音合成失败")
+        return "\n".join(results)
+    results.append(f"✅ [2/6] 语音合成完成")
+
+    # ================================================================
+    # Step 3: 数字人口型合成
+    # ================================================================
+    logging.info("🎬 开始生成数字人视频...")
+    try:
+        video_result = generate_tuilionnx_video(
+            face_model, None, audio_path,
+            batch_size=4, sync_offset=0,
+            scale_h=1.6, scale_w=3.6,
+            compress=False, beautify_teeth=False,
+            silence_check=False, add_watermark=True,
+            bg_image=None, bg_image_list=None, check_box=False,
+        )
+        # generate_tuilionnx_video returns (video_path, time_str, file_data, url)
+        video_path = video_result[0] if video_result else None
+        if not video_path or not os.path.exists(video_path):
+            results.append("❌ [3/6] 数字人视频生成失败")
+            return "\n".join(results)
+        results.append(f"✅ [3/6] 数字人视频生成完成")
+    except Exception as e:
+        results.append(f"❌ [3/6] 数字人视频生成异常: {e}")
+        return "\n".join(results)
+
+    # ================================================================
+    # Step 4: 嵌入字幕
+    # ================================================================
+    logging.info("📝 为视频嵌入字幕...")
+    try:
+        subtitle_status, video_path = add_subtitles_to_video_with_style(
+            video_path,
+            subtitle_font,
+            subtitle_size,
+            subtitle_color,
+            subtitle_outline,
+            subtitle_margin,
+        )
+        if video_path and os.path.exists(video_path):
+            results.append(f"✅ [4/6] 字幕已嵌入 ({subtitle_font}, {subtitle_size}px)")
+        else:
+            results.append(f"⚠️ [4/6] 字幕嵌入返回状态异常: {subtitle_status}")
+    except Exception as e:
+        logging.warning(f"字幕嵌入失败: {e}")
+        results.append(f"⚠️ [4/6] 字幕嵌入失败（已跳过）: {e}")
+
+    # ================================================================
+    # Step 5: 添加 BGM（可选）
+    # ================================================================
+    if not skip_bgm_add_box:
+        bgm_path = _resolve_bgm_path(bgm_list, user_upload_bgm)
+        if bgm_path:
+            logging.info("🎵 添加背景音乐...")
+            try:
+                _, video_path = add_bgm_to_video_function(
+                    video_path, bgm_list, user_upload_bgm, bgm_volume_control
+                )
+                results.append(f"✅ [5/6] 背景音乐已添加")
+            except Exception as e:
+                logging.warning(f"BGM 添加失败: {e}")
+                results.append(f"⚠️ [5/6] BGM 添加失败（已跳过）")
+        else:
+            results.append(f"⏭️ [5/6] 未选择背景音乐（已跳过）")
+    else:
+        results.append(f"⏭️ [5/6] 已勾选跳过 BGM")
+
+    # ================================================================
+    # Step 6: LLM 生成标题/描述/标签 + 发布
+    # ================================================================
+    logging.info("🤖 LLM 生成发布内容...")
+    content = AI_generate_publish_content(text)
+    title = content.get("title", "") or text[:20]
+    description = content.get("description", "")
+    tags = content.get("tags", [])
+
+    logging.info("🚀 开始发布到抖音...")
+    publish_result = auto_publishing_videos_DY(
+        video_path=video_path,
+        title=title,
+        description=description,
+        tags=tags,
+        bgm_path="",
+        pulish_with_cover=pulish_with_cover,
+    )
+    results.append(f"✅ [6/6] LLM 标题: {title}")
+    results.append(f"   {publish_result}")
+
+    return "\n".join(results)
 
 
 def create_ui():
@@ -457,6 +772,12 @@ def create_ui():
                     pulish_with_cover = gr.Checkbox(
                         label="发布时附带封面？", value=False
                     )
+            # ── 效果预览区域 ──
+            with gr.Row():
+                preview_btn = gr.Button("效果预览", variant="primary")
+            with gr.Row():
+                effect_preview = gr.Image(label="字幕效果预览", interactive=False)
+
             # 发布按钮（页面最下方）
             with gr.Row():
                 Post_on_DY = gr.Button("发布到dou音", size="large", variant="primary")
@@ -695,40 +1016,26 @@ def create_ui():
             #     ],  # 添加模型选择下拉框
             # )
 
-            # 一键发布到抖音
+
+            # 一键追爆款并发布到抖音（全自动：下载→生成→字幕→BGM→发布）
             Post_on_DY_ALL.click(
-                auto_publishing_videos_DY_ALL,
+                auto_full_pipeline,
                 inputs=[
-                    link_input,
-                    two_line_input,
-                    pt_file_dropdown,
-                    video_model_dropdown,
-                    api_key,
-                    speed,
-                    pt_files_info,
-                    background_image,
-                    background_image_list,
-                    check_box,
-                    skip_bgm_add_box,
-                    bgm_list,
-                    user_upload_bgm,
-                    bgm_volume_control,
-                    when_auto_use_cover_checkbox,
-                    use_ai_checkbox,
-                    cover_text,
-                    highlight_words_text,
-                    font_family_dropdown,
-                    font_size_number,
-                    font_color_picker,
-                    highlight_color_picker,
-                    position_dropdown,
-                    frame_time_number,
-                    pulish_with_cover,
-                    silence_check_box,
-                    digital_human_version_dropdown,
-                    subtitle_generation_type_dropdown,
-                    template_id
-                ],  # 添加新增的组件
+                    link_input,           # ① 抖音视频分享链接
+                    pt_file_dropdown,     # ② TTS 音色
+                    face,                 # ③ 数字人形象
+                    speed,                # ④ 语速
+                    bgm_list,             # ⑤ 背景音乐（下拉）
+                    user_upload_bgm,      # ⑥ 背景音乐（上传）
+                    bgm_volume_control,   # ⑦ BGM 音量
+                    pulish_with_cover,    # ⑧ 附带封面
+                    skip_bgm_add_box,     # ⑨ 跳过 BGM
+                    font_family,          # ⑩ 字幕字体
+                    font_size,            # ⑪ 字幕大小
+                    font_color,           # ⑫ 字幕颜色
+                    outline_color,        # ⑬ 描边颜色
+                    bottom_margin,        # ⑭ 底部边距
+                ],
                 outputs=[status_output],
             )
 
@@ -747,10 +1054,25 @@ def create_ui():
                 show_progress=True,  # 显示进度
             )
 
-            # 发布到抖音
+            # ── 效果预览按钮：从视频抽帧 + 叠加字幕样式 → 预览图 ──
+            preview_btn.click(
+                fn=generate_video_preview,
+                inputs=[
+                    video_output,     # 视频路径
+                    text_input,       # 字幕文案（来自提取的文案）
+                    font_family,      # 字体
+                    font_size,        # 字号
+                    font_color,       # 字体颜色
+                    outline_color,    # 描边颜色
+                    bottom_margin,    # 底部边距
+                ],
+                outputs=[effect_preview],
+            )
+
+            # 发布到抖音（自动 LLM 生成标题/文案/标签 + 选 BGM）
             Post_on_DY.click(
-                auto_publishing_videos_DY,
-                inputs=[video_output, two_line_input, pulish_with_cover],
+                auto_publish_dy_with_llm,
+                inputs=[video_output, text_input, bgm_list, user_upload_bgm, pulish_with_cover],
                 outputs=[status_output],
             )
             # 发布到小红书
@@ -769,8 +1091,8 @@ def create_ui():
 
             # 一键发布到抖音小红书视频号
             Post_on_ALL.click(
-                auto_publishing_videos_ALL,
-                inputs=[video_output, two_line_input, pulish_with_cover],
+                auto_publish_dy_with_llm,
+                inputs=[video_output, text_input, bgm_list, user_upload_bgm, pulish_with_cover],
                 outputs=[status_output],
             )
 

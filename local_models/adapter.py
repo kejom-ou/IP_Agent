@@ -85,6 +85,56 @@ def AI_write_descriptions(text: str, api_key: Optional[str]) -> str:
     return engine.engine.generate(messages, temperature=0.8, max_tokens=512)
 
 
+def AI_generate_publish_content(video_script: str):
+    """
+    根据视频文案，一次性生成发布所需的所有内容。
+
+    Returns:
+        dict: {"title": str, "description": str, "tags": [str, ...]}
+    """
+    engine = LocalLLMEngine()
+    if not engine.init():
+        return {"title": "", "description": "", "tags": []}
+
+    prompt = (
+        "根据以下视频文案，生成抖音发布所需的内容。严格按格式输出，不要额外说明：\n\n"
+        "【标题】\n（10-20字，吸引眼球的标题）\n\n"
+        "【描述】\n（30-80字，突出亮点）\n\n"
+        "【标签】\n#标签1 #标签2 #标签3 #标签4 #标签5\n\n"
+        f"视频文案：\n{video_script}"
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": "你是一个专业的短视频运营，擅长写爆款标题和标签。只输出指定格式，不说废话。",
+        },
+        {"role": "user", "content": prompt},
+    ]
+    raw = engine.engine.generate(messages, temperature=0.8, max_tokens=512)
+
+    # 解析结构化输出
+    title = ""
+    description = ""
+    tags: List[str] = []
+
+    for line in raw.split("\n"):
+        line = line.strip()
+        if line.startswith("【标题】") or line.startswith("标题："):
+            title = line.split("】", 1)[-1].split("：", 1)[-1].strip()
+        elif line.startswith("【描述】") or line.startswith("描述："):
+            description = line.split("】", 1)[-1].split("：", 1)[-1].strip()
+        elif line.startswith(("#", "【标签】", "标签：")):
+            tag_line = line
+            if tag_line.startswith("【标签】") or tag_line.startswith("标签："):
+                tag_line = tag_line.split("】", 1)[-1].split("：", 1)[-1]
+            for token in tag_line.split():
+                token = token.strip("#").strip()
+                if token and token not in tags:
+                    tags.append(token)
+
+    return {"title": title, "description": description, "tags": tags}
+
+
 # ===========================================================================
 # 语音合成（TTS）
 # ===========================================================================
