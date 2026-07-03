@@ -1,9 +1,10 @@
-# 本地模型依赖（Windows）
+# 本地模型依赖
 # 安装: pip install -r local_models/requirements.txt
 
 # ---- 核心 ----
 torch>=2.1.0
 transformers>=4.40.0
+numpy>=1.24.0
 
 # ---- LLM INT4 量化（8GB 显存适配） ----
 # Windows 注意: bitsandbytes 对 Windows 支持不稳定，安装失败可跳过（LLM 自动回退 FP16）
@@ -13,5 +14,26 @@ bitsandbytes>=0.43.0
 funasr>=1.0.0
 modelscope>=1.14.0
 
+# ---- TTS 语音合成（CosyVoice） ----
+soundfile>=0.12.0
+
+# ---- 视频处理 ----
+opencv-python>=4.8.0
+
 # ---- 视频下载 ----
 yt-dlp>=2024.0.0
+
+# ---- Web UI（Gradio） ----
+gradio>=4.0.0
+
+# ---- 视频自动发布（抖音） ----
+# 注意: 安装后还需执行 playwright install chromium
+playwright>=1.40.0
+
+# ---- API 服务 ----
+fastapi>=0.109.0
+requests>=2.31.0
+psutil>=5.9.0
+
+# ---- Windows 特需 ----
+# pywin32>=305  ; Windows 下需单独安装: pip install pywin32
