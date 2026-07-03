@@ -29,9 +29,8 @@ ROOT_DIR = Path(__file__).parent.parent.absolute()
 
 # ---- 配置 ----
 APP_NAME = "旗博士追爆智能体"
-MAIN_SCRIPT = "combined_launcher.py"          # 主入口（位于项目根）
-FALLBACK_SCRIPT = "app.py"
-ICON_FILE = None                              # 暂未提供 .ico 文件
+MAIN_SCRIPT = "local_models/pipeline_gradio.py"  # 唯一启动入口
+ICON_FILE = None                                    # 暂未提供 .ico 文件
 
 # 需要打包的数据目录
 INCLUDE_DIRS = [
@@ -64,18 +63,13 @@ def check_pyinstaller():
     return False
 
 
-def find_main_script():
-    """找到可用的主入口脚本"""
-    for script in [MAIN_SCRIPT, FALLBACK_SCRIPT]:
-        if (ROOT_DIR / script).exists():
-            return script
-    print("❌ 未找到启动脚本 (combined_launcher.py / app.py)")
-    sys.exit(1)
-
-
 def build_exe():
     """执行 PyInstaller 打包"""
-    main_script = find_main_script()
+    main_script_path = ROOT_DIR / MAIN_SCRIPT
+    if not main_script_path.exists():
+        print(f"❌ 未找到启动脚本: {MAIN_SCRIPT}")
+        sys.exit(1)
+
     build_dir = ROOT_DIR / "pyinstaller_build"
     dist_dir = ROOT_DIR / "dist"
 
@@ -137,11 +131,11 @@ def build_exe():
         cmd += ["--exclude-module", mod]
 
     # 目标脚本
-    cmd.append(str(ROOT_DIR / main_script))
+    cmd.append(str(main_script_path))
 
     print("=" * 60)
     print("📦 PyInstaller 打包")
-    print(f"   主脚本: {main_script}")
+    print(f"   主脚本: {MAIN_SCRIPT}")
     print(f"   输出: {dist_dir / APP_NAME}.exe")
     print("   预计: 500MB - 2GB（取决于依赖）")
     print("=" * 60)

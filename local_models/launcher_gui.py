@@ -7,6 +7,7 @@
 
 import os
 import sys
+import shutil
 import subprocess
 import threading
 import time
@@ -438,36 +439,146 @@ class LauncherGUI:
         self.launch_btn["state"] = "disabled"
         threading.Thread(target=self._run_download_models, daemon=True).start()
 
+    # ============================================================
+    # Chrome 启动 + 抖音登录引导
+    # ============================================================
+    def _find_chrome(self):
+        """查找浏览器可执行文件（系统 Chrome > Playwright Chromium）"""
+        # 1) 系统 Chrome / Chromium
+        if sys.platform == "darwin":
+            candidates = [
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            ]
+        elif sys.platform == "win32":
+            candidates = [
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                             r"Google\Chrome\Application\chrome.exe"),
+            ]
+        else:
+            candidates = [
+                shutil.which("google-chrome"),
+                shutil.which("google-chrome-stable"),
+                shutil.which("chromium"),
+                shutil.which("chromium-browser"),
+            ]
+            candidates = [c for c in candidates if c]
+
+        for p in candidates:
+            if p and os.path.exists(p):
+                return p
+
+        # 2) Playwright 自带的 Chromium（无需用户单独装 Chrome）
+        try:
+            from playwright.sync_api import sync_playwright
+            pw = sync_playwright().start()
+            try:
+                browser = pw.chromium.launch(
+                    headless=True,
+                    args=["--no-sandbox"],
+                )
+                # 获取 Playwright Chromium 可执行文件路径
+                exe_path = browser.version  # 实际上这返回版本号…
+                # 真正的方式：用 pw.chromium.executable_path
+                exe_path = pw.chromium.executable_path
+                browser.close()
+                pw.stop()
+                if exe_path and os.path.exists(exe_path):
+                    return exe_path
+            except Exception:
+                pw.stop()
+        except Exception:
+            pass
+
+        return None
+
+    def _get_chrome_profile_dir(self):
+        """获取专用 Chrome profile 目录（用于持久化抖音登录状态）"""
+        if sys.platform == "win32":
+            base = os.environ.get("APPDATA", os.path.expanduser("~"))
+        elif sys.platform == "darwin":
+            base = os.path.expanduser("~/Library/Application Support")
+        else:
+            base = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+
+        profile_dir = os.path.join(base, "QBS_Agent", "chrome_profile")
+        os.makedirs(profile_dir, exist_ok=True)
+        return profile_dir
+
     def _launch(self):
         """启动主应用"""
         self.log("\n🚀 正在启动应用...\n")
 
-        # 选择启动入口（三级 fallback）
-        launch_script = None
-        server_port = 8000
+        # 唯一启动入口：local_models/pipeline_gradio.py
+        launch_script = ROOT_DIR / "local_models" / "pipeline_gradio.py"
+        server_port = 7860
 
-        for candidate, port in [
-            (ROOT_DIR / "combined_launcher.py", 8000),
-            (ROOT_DIR / "app.py", 8000),
-            (ROOT_DIR / "local_models" / "pipeline_gradio.py", 7860),
-        ]:
-            if candidate.exists():
-                launch_script = candidate
-                server_port = port
-                break
-
-        if not launch_script:
-            messagebox.showerror("错误", "未找到可用的启动脚本！")
+        if not launch_script.exists():
+            messagebox.showerror("错误", "未找到启动脚本 pipeline_gradio.py！")
             return
 
-        self.log(f"  启动脚本: {launch_script.name}\n")
-        self.log(f"  服务端口: {server_port}\n")
+        # ============================================================
+        # Step 1: 启动 Chrome 调试模式 + 抖音登录引导
+        # ============================================================
+        chrome_ready = False
+
+        if state.playwright_ok:
+            chrome_path = self._find_chrome()
+            if chrome_path:
+                self.log("🔧 启动 Chrome 调试模式 (CDP 端口 9222)...\n")
+                profile_dir = self._get_chrome_profile_dir()
+
+                try:
+                    subprocess.Popen(
+                        [chrome_path,
+                         "--remote-debugging-port=9222",
+                         f"--user-data-dir={profile_dir}",
+                         "--no-first-run",
+                         "--no-default-browser-check",
+                         "https://creator.douyin.com/"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    self.log("✅ Chrome 已启动（独立 profile，登录状态会保留）\n")
+                    self.log("📋 请在打开的浏览器中登录抖音创作者平台\n")
+                    self.log("   （首次需输入账号密码，后续自动登录）\n\n")
+
+                    # 弹出确认框，等用户手动登录
+                    result = messagebox.askquestion(
+                        "抖音登录确认",
+                        "已打开抖音创作者平台登录页。\n\n"
+                        "请确认已在浏览器中完成登录后，\n"
+                        "点击「是」继续启动应用。\n\n"
+                        "点击「否」将跳过自动发布功能。",
+                    )
+
+                    if result == "yes":
+                        chrome_ready = True
+                        self.log("✅ 抖音登录已确认\n\n")
+                    else:
+                        self.log("⚠️ 跳过抖音登录，自动发布功能不可用\n\n")
+                except Exception as e:
+                    self.log(f"⚠️ Chrome 启动失败: {e}\n\n")
+            else:
+                self.log("⚠️ 未找到 Chrome 浏览器，抖音自动发布不可用\n\n")
+        else:
+            self.log("⚠️ Playwright 未安装，抖音自动发布不可用\n\n")
+
+        # ============================================================
+        # Step 2: 启动 pipeline_gradio.py
+        # ============================================================
+        self.log(f"🚀 启动: {launch_script.name}\n")
+        self.log(f"   端口: {server_port}\n\n")
 
         # 设置环境变量
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONPATH"] = str(ROOT_DIR) + os.pathsep + env.get("PYTHONPATH", "")
+        # 传递 Chrome CDP 端口，供 publisher.py 复用
+        if chrome_ready:
+            env["CHROME_CDP_PORT"] = "9222"
 
         # 启动进程
         try:
@@ -505,13 +616,14 @@ class LauncherGUI:
         except Exception:
             self.log("⚠️ 无法自动打开浏览器，请手动访问\n")
 
-        # 显示启动成功弹窗
-        messagebox.showinfo(
-            "启动成功",
-            f"🎉 旗博士追爆智能体已启动！\n\n"
-            f"访问地址: {url}\n\n"
-            f"关闭本窗口不会停止服务进程。"
-        )
+        # 启动成功弹窗
+        status_msg = "🎉 旗博士追爆智能体已启动！"
+        if chrome_ready:
+            status_msg += "\n\n✅ 抖音自动发布功能已就绪"
+        else:
+            status_msg += "\n\n⚠️ 抖音自动发布功能未启用（需 Chrome + Playwright）"
+
+        messagebox.showinfo("启动成功", status_msg + f"\n\n访问地址: {url}")
 
     def run(self):
         self.root.mainloop()

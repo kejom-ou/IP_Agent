@@ -159,29 +159,12 @@ if %errorlevel% neq 0 (
     "%PYTHON_EXE%" -m pip install -r "%REQ_FILE%" -q 2>nul
 )
 
-:: 启动
-set "LAUNCHED=0"
-set "SERVER_PORT=8000"
+:: 启动（唯一入口：local_models/pipeline_gradio.py）
+set "LAUNCH_SCRIPT=%ROOT_DIR%local_models\pipeline_gradio.py"
+set "SERVER_PORT=7860"
 
-if %LAUNCHED% equ 0 (
-    if exist "%ROOT_DIR%combined_launcher.py" (
-        set "LAUNCH_SCRIPT=%ROOT_DIR%combined_launcher.py" & set "LAUNCHED=1"
-    )
-)
-if %LAUNCHED% equ 0 (
-    if exist "%ROOT_DIR%app.py" (
-        set "LAUNCH_SCRIPT=%ROOT_DIR%app.py" & set "LAUNCHED=1"
-    )
-)
-if %LAUNCHED% equ 0 (
-    if exist "%ROOT_DIR%local_models\pipeline_gradio.py" (
-        set "LAUNCH_SCRIPT=%ROOT_DIR%local_models\pipeline_gradio.py"
-        set "SERVER_PORT=7860" & set "LAUNCHED=1"
-    )
-)
-
-if %LAUNCHED% equ 0 (
-    echo ❌ 未找到启动脚本！
+if not exist "%LAUNCH_SCRIPT%" (
+    echo ❌ 未找到启动脚本: local_models\pipeline_gradio.py
     pause
     exit /b 1
 )
@@ -217,7 +200,7 @@ echo.
 echo ╔══════════════════════════════════════════════════╗
 echo ║  🎉 旗博士追爆智能体 已启动                    ║
 echo ║                                                ║
-echo ║  界面地址: http://127.0.0.1:8000               ║
+echo ║  界面地址: http://127.0.0.1:7860               ║
 echo ║  关闭此窗口将停止服务                          ║
 echo ╚══════════════════════════════════════════════════╝
 echo.
