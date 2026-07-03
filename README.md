@@ -117,7 +117,7 @@ result = engine.synthesize(
     speed=1.0,
     output_path="output.wav",
 )
-engine.unload()  # 释放 ~1-2GB 显存
+engine.unload()  # 释放 ~4GB 显存
 ```
 
 测试：
