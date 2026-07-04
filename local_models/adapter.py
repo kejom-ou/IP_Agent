@@ -19,31 +19,48 @@ logger = logging.getLogger(__name__)
 # ===========================================================================
 
 def download_and_extract_text(video_url: str) -> str:
-    """从视频链接提取口播文案"""
+    """从视频链接提取口播文案（自动适配抖音 / 通用平台）"""
     import tempfile, subprocess, os
 
+    from local_models.douyin_crawler import DouyinCrawler
+
     with tempfile.TemporaryDirectory() as tmpdir:
-        video_path = os.path.join(tmpdir, "input_video.mp4")
         audio_path = os.path.join(tmpdir, "audio.wav")
 
-        try:
-            subprocess.run(
-                ["yt-dlp", "-f", "best", "-o", video_path, "--no-playlist", video_url],
-                check=True, capture_output=True, timeout=120,
-            )
-        except Exception as e:
-            logger.error(f"视频下载失败: {e}")
-            return ""
+        # ------------------------------------------------------------------
+        # 抖音链接 → 纯 HTTP 爬虫直接下载音频（无需登录、无需浏览器）
+        # ------------------------------------------------------------------
+        if DouyinCrawler.is_douyin_url(video_url):
+            logger.info("检测到抖音链接，使用纯爬虫模式提取音频...")
+            crawler = DouyinCrawler()
+            downloaded = crawler.download_audio(video_url, output_dir=tmpdir)
+            if downloaded:
+                audio_path = downloaded
+            else:
+                logger.error("抖音爬虫音频提取失败")
+                return ""
+        else:
+            # 通用平台 → yt-dlp 下载视频 → ffmpeg 提取音频
+            video_path = os.path.join(tmpdir, "input_video.mp4")
+            try:
+                subprocess.run(
+                    ["yt-dlp", "-f", "best", "-o", video_path, "--no-playlist", video_url],
+                    check=True, capture_output=True, timeout=120,
+                )
+            except Exception as e:
+                logger.error(f"视频下载失败: {e}")
+                return ""
 
-        try:
-            subprocess.run([
-                "ffmpeg", "-i", video_path, "-vn", "-acodec", "pcm_s16le",
-                "-ar", "16000", "-ac", "1", audio_path, "-y",
-            ], check=True, capture_output=True)
-        except Exception as e:
-            logger.error(f"音频提取失败: {e}")
-            return ""
+            try:
+                subprocess.run([
+                    "ffmpeg", "-i", video_path, "-vn", "-acodec", "pcm_s16le",
+                    "-ar", "16000", "-ac", "1", audio_path, "-y",
+                ], check=True, capture_output=True)
+            except Exception as e:
+                logger.error(f"音频提取失败: {e}")
+                return ""
 
+        # ASR 转写
         asr = ASREngine()
         if not asr.load():
             return ""

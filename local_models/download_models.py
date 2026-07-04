@@ -24,11 +24,14 @@ MODELS_DIR = ROOT_DIR / "pretrained_models"
 
 # ModelScope 模型 ID → 本地子目录
 MODELS = [
-    ("ASR: faster-whisper-small",       "iic/speech_faster_whisper_asr_zh_epoch3-small", "faster-whisper-small"),
+    ("ASR: SenseVoiceSmall",            "iic/SenseVoiceSmall",                           "SenseVoiceSmall"),
     ("LLM: Qwen2.5-0.5B-Instruct",      "Qwen/Qwen2.5-0.5B-Instruct",                   "Qwen2.5-0.5B-Instruct"),
     ("TTS: CosyVoice-300M-SFT (Lite)",  "iic/CosyVoice-300M-SFT",                       "CosyVoice-300M-SFT"),
-    ("LipSync: MuseTalk",               "iic/MuseTalk",                                  "MuseTalk"),
 ]
+
+# Wav2Lip 模型需手动下载（不在 ModelScope 上）
+#   wav2lip_gan.pth → pretrained_models/Wav2Lip/wav2lip_gan.pth
+#   下载地址: https://drive.google.com/file/d/15G3U08c8xsCkOqQxE38Z2XXDnPcOptNk/view
 
 
 def download_model(name: str, model_id: str, subdir: str):

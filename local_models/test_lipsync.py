@@ -1,7 +1,6 @@
 """
-LipSync 单项测试 — 使用本地 MuseTalk 模型
+LipSync 单项测试 — 使用本地 Wav2Lip 模型
 """
-
 import os
 import sys
 import logging
@@ -13,11 +12,11 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 
-from local_models.lipsync import MuseTalkEngine
+from local_models.lipsync import Wav2LipEngine
 
 if __name__ == "__main__":
     video_path = input("口播视频路径: ").strip()
-    audio_path = input("音频路径: ").strip()
+    audio_path = input("音频路径 (16kHz wav): ").strip()
 
     if not os.path.exists(video_path):
         print(f"❌ 视频不存在: {video_path}")
@@ -26,8 +25,8 @@ if __name__ == "__main__":
         print(f"❌ 音频不存在: {audio_path}")
         sys.exit(1)
 
-    engine = MuseTalkEngine()
-    print("加载本地 MuseTalk 模型...")
+    engine = Wav2LipEngine()
+    print("加载本地 Wav2Lip 模型...")
     if not engine.load():
         print("❌ 加载失败")
         sys.exit(1)

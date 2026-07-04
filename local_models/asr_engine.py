@@ -19,7 +19,7 @@ class ASREngine:
 
     def __init__(self):
         self.model_path = ASR_CONFIG["local_path"]
-        self.device = "cpu"  # ASR 固定在 CPU，避免与 LLM/TTS 抢显存
+        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self.model = None
 
     def load(self) -> bool:

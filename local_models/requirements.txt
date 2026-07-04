@@ -7,15 +7,37 @@ transformers>=4.40.0
 numpy>=1.24.0
 
 # ---- LLM INT4 量化（8GB 显存适配） ----
-# Windows 注意: bitsandbytes 对 Windows 支持不稳定，安装失败可跳过（LLM 自动回退 FP16）
 bitsandbytes>=0.43.0
+accelerate>=0.20.0
 
 # ---- 语音识别（FunASR SenseVoiceSmall） ----
 funasr>=1.0.0
 modelscope>=1.14.0
+addict  # modelscope 隐式依赖
+datasets  # modelscope 隐式依赖（新版强制要求）
+simplejson  # modelscope jsonplus 用
+sortedcontainers  # modelscope pipeline 用
+python-Levenshtein  # 替代 editdistance（无需 Rust 工具链）
 
-# ---- TTS 语音合成（CosyVoice） ----
+# ---- TTS 语音合成（CosyVoice AutoModel，需先行克隆 CosyVoice 仓库） ----
 soundfile>=0.12.0
+HyperPyYAML
+inflect
+wetext
+conformer
+onnxruntime-gpu
+x-transformers
+pyworld
+omegaconf
+diffusers
+onnx
+librosa
+openai-whisper
+matplotlib
+gdown
+pytorch_lightning
+networkx
+hydra-core
 
 # ---- 视频处理 ----
 opencv-python>=4.8.0

@@ -34,15 +34,16 @@ def detect_vram_gb() -> int:
 # 模型配置（每个模型都指定 local_path）
 # ---------------------------------------------------------------------------
 
-# ASR — ModelScope pipeline，本地 faster-whisper 模型
+# ASR — ModelScope pipeline，本地 SenseVoiceSmall 模型
 ASR_CONFIG = {
-    "local_path": str(LOCAL_MODELS_DIR / "faster-whisper-small"),
+    "local_path": str(LOCAL_MODELS_DIR / "SenseVoiceSmall"),
 }
 
 # LLM — Transformers 原生推理（ModelScope pipeline 不支持 chat template）
 LLM_CONFIG = {
     "name": "Qwen2.5-0.5B-Instruct",
     "local_path": str(LOCAL_MODELS_DIR / "Qwen2.5-0.5B-Instruct"),
+    "quantization": "int4",  # INT4 量化 ~0.5GB 显存
 }
 
 # TTS — ModelScope pipeline，本地 CosyVoice Lite 模型（~1-2GB 显存）
@@ -50,9 +51,9 @@ TTS_CONFIG = {
     "local_path": str(LOCAL_MODELS_DIR / "CosyVoice-300M-SFT"),
 }
 
-# LipSync — ModelScope pipeline，本地 MuseTalk 模型
+# LipSync — Wav2Lip 轻量口型合成，本地 wav2lip_gan.pth 模型
 LIPSYNC_CONFIG = {
-    "local_path": str(LOCAL_MODELS_DIR / "MuseTalk"),
+    "local_path": str(LOCAL_MODELS_DIR / "Wav2Lip"),
 }
 
 

@@ -370,7 +370,7 @@ class LauncherGUI:
         # FFmpeg
         self.set_status("ffmpeg", "⏳ 检查中...", "pending")
         ffmpeg_local = (ROOT_DIR / "ffmpeg" / "bin" / "ffmpeg.exe").exists()
-        state.ffmpeg_ok = ffmpeg_local or check_tool("ffmpeg")
+        state.ffmpeg_ok = ffmpeg_local or check_tool("ffmpeg", "ffmpeg")
         self.set_status("ffmpeg",
                         "✅ 可用" if state.ffmpeg_ok else "⚠️ 未安装",
                         "ok" if state.ffmpeg_ok else "warn")
@@ -378,7 +378,7 @@ class LauncherGUI:
         # ImageMagick
         self.set_status("imagemagick", "⏳ 检查中...", "pending")
         magick_local = (ROOT_DIR / "ImageMagick-7.1.1-Q16-HDRI" / "magick.exe").exists()
-        state.imagemagick_ok = magick_local or check_tool("magick")
+        state.imagemagick_ok = magick_local or check_tool("magick", "magick")
         self.set_status("imagemagick",
                         "✅ 可用" if state.imagemagick_ok else "⚠️ 未安装",
                         "ok" if state.imagemagick_ok else "warn")
