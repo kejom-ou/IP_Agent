@@ -44,7 +44,7 @@ class CosyVoiceEngine:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             else:
-                logger.warning("⚠️ 未检测到 CUDA，CosyVoice 将在 CPU 上运行（较慢）")
+                logger.warning("未检测到 CUDA，CosyVoice 将在 CPU 上运行（较慢）")
 
             logger.info(f"加载 CosyVoice AutoModel 从: {self.model_path}")
             use_fp16 = (self.device == "cuda")
@@ -255,8 +255,8 @@ def handle_audio_creation_local(
     engine = CosyVoiceEngine()
     audio_path = engine.synthesize(text=text, speaker=speaker, speed=speed)
     if audio_path:
-        return audio_path, "✅ 语音合成完成"
-    return None, "❌ 语音合成失败"
+        return audio_path, "语音合成完成"
+    return None, "语音合成失败"
 
 
 def generate_audio_only_local(text: str, api_key: Optional[str] = None) -> Tuple[Optional[str], str]:

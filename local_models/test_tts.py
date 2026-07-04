@@ -19,13 +19,13 @@ if __name__ == "__main__":
     engine = CosyVoiceEngine()
     text = input("合成文本: ").strip()
     if not text:
-        print("❌ 文本为空")
+        print("文本为空")
         sys.exit(1)
 
     output_path = os.path.join(os.path.dirname(__file__), "test_output.wav")
     result = engine.synthesize(text=text, speaker="default", speed=1.0, output_path=output_path)
     if result:
-        print(f"✅ 合成完成: {result}")
+        print(f"合成完成: {result}")
     else:
-        print("❌ 合成失败")
+         print("合成失败")
     engine.unload()

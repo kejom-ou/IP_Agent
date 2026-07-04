@@ -15,6 +15,7 @@ from typing import Optional
 
 import numpy as np
 import torch
+torch.backends.cudnn.enabled = False  # RTX 5060 Blackwell cuDNN 兼容
 import torch.nn as nn
 import torch.nn.functional as F
 import cv2
@@ -290,23 +291,33 @@ class Wav2LipEngine:
                 logger.error("请下载 wav2lip_gan.pth 到 pretrained_models/Wav2Lip/")
                 return False
 
-            # 尝试加载（支持 TorchScript 和常规 state_dict 两种格式）
+            # 尝试加载（优先 state_dict 避免 TorchScript cuDNN 固化问题）
             try:
-                # 先尝试作为 TorchScript 模型加载
-                self.model = torch.jit.load(self.model_path, map_location=self.device)
-                self._is_torchscript = True
-                logger.info("以 TorchScript 格式加载 Wav2Lip")
-            except Exception:
-                # 回退：常规 state_dict 格式
+                # 模型文件可能是 TorchScript 或普通 checkpoint
+                # 策略：先 torch.jit.load，再提取 state_dict 灌入 Python nn.Module
+                script_model = torch.jit.load(self.model_path, map_location=self.device)
                 self.model = Wav2Lip().to(self.device)
-                checkpoint = torch.load(self.model_path, map_location=self.device, weights_only=False)
-                state_dict = checkpoint.get("state_dict", checkpoint)
-                new_state = {}
-                for k, v in state_dict.items():
-                    new_state[k.replace("module.", "")] = v
-                self.model.load_state_dict(new_state, strict=True)
+                self.model.load_state_dict(script_model.state_dict(), strict=True)
                 self._is_torchscript = False
-                logger.info("以 state_dict 格式加载 Wav2Lip")
+                del script_model
+                logger.info("以 state_dict 格式加载 Wav2Lip（从 TorchScript 提取）")
+            except Exception:
+                try:
+                    # 回退 2：普通 checkpoint
+                    checkpoint = torch.load(self.model_path, map_location=self.device, weights_only=False)
+                    self.model = Wav2Lip().to(self.device)
+                    state_dict = checkpoint.get("state_dict", checkpoint)
+                    new_state = {}
+                    for k, v in state_dict.items():
+                        new_state[k.replace("module.", "")] = v
+                    self.model.load_state_dict(new_state, strict=True)
+                    self._is_torchscript = False
+                    logger.info("以 state_dict 格式加载 Wav2Lip")
+                except Exception:
+                    # 回退 3：纯 TorchScript
+                    self.model = torch.jit.load(self.model_path, map_location=self.device)
+                    self._is_torchscript = True
+                    logger.info("以 TorchScript 格式加载 Wav2Lip")
 
             self.model.eval()
             logger.info("Wav2Lip 模型加载完成")
@@ -574,16 +585,10 @@ class Wav2LipEngine:
                     end = min(start + self.BATCH_SIZE, len(faces))
                     m_batch = mel_tensor[start:end]  # (B, 1, 80, 16)
 
-                    if self._is_torchscript:
-                        # TorchScript 模型：4D 输入 (B, C, H, W)
-                        f_batch = faces_tensor[start:end]  # (B, 6, 96, 96)
-                        pred = self.model(m_batch, f_batch)  # (B, 3, 96, 96)
-                        gen = pred.permute(0, 2, 3, 1).cpu().numpy()  # (B, 96, 96, 3)
-                    else:
-                        # Python nn.Module：5D 输入 (B, C, T, H, W)
-                        f_batch = faces_tensor[start:end].unsqueeze(2)  # (B, 6, 1, 96, 96)
-                        pred = self.model(m_batch, f_batch)  # (B, 3, 1, 96, 96)
-                        gen = pred.squeeze(2).permute(0, 2, 3, 1).cpu().numpy()  # (B, 96, 96, 3)
+                    # 统一使用 4D 输入 (B, C, H, W)，forward 内部自动处理
+                    f_batch = faces_tensor[start:end]  # (B, 6, 96, 96)
+                    pred = self.model(m_batch, f_batch)  # (B, 3, 96, 96)
+                    gen = pred.permute(0, 2, 3, 1).cpu().numpy()  # (B, 96, 96, 3)
                     gen_faces.append(gen)
                     if (bi + 1) % max(1, n_batches // 5) == 0:
                         logger.info(f"  Wav2Lip 推理进度: {bi+1}/{n_batches} batches")
