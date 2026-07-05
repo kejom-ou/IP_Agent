@@ -22,6 +22,7 @@ import os
 import re
 import sys
 import time
+import uuid
 import tempfile
 import logging
 import subprocess
@@ -243,12 +244,13 @@ def step1_extract_text(file_obj) -> Tuple[str, str]:
 # 步骤 2：文案仿写（LLM）
 # ===========================================================================
 
-def step2_rewrite(text: str, ai_mode: str, custom_prompt: str) -> Tuple[str, str]:
+def step2_rewrite(text: str, ai_mode: str, custom_prompt: str) -> Tuple[str, str, str, str]:
     """
     使用本地 Qwen2.5 模型对文案进行 AI 仿写（INT4 量化，~0.5GB 显存）。
+    返回: (正文, 标题, 标签, 状态)
     """
     if not text or not text.strip():
-        return "", "❌ 请先提取文案"
+        return "", "", "", "❌ 请先提取文案"
 
     logger.info(f"[LLM] 开始仿写，模式: {ai_mode}")
 
@@ -263,14 +265,18 @@ def step2_rewrite(text: str, ai_mode: str, custom_prompt: str) -> Tuple[str, str
         # 用后立即卸载，释放显存给 TTS
         _unload_llm()
 
-        if result and result != text:
-            return result, f"✅ 仿写完成，{len(result)} 字符"
+        rewritten = result.get("text", text)
+        title = result.get("title", "")
+        tags = result.get("tags", "")
+
+        if rewritten and rewritten != text:
+            return rewritten, title, tags, f"✅ 仿写完成，{len(rewritten)} 字符"
         else:
-            return text, "⚠️ 仿写未生效，使用原文"
+            return text, "", "", "⚠️ 仿写未生效，使用原文"
     except Exception as e:
         _unload_llm()
         logger.error(f"[LLM] 仿写失败: {e}")
-        return text, f"❌ 仿写失败: {e}"
+        return text, "", "", f"❌ 仿写失败: {e}"
 
 
 # ===========================================================================
@@ -319,12 +325,23 @@ def step3_generate_audio(
             # 上传/录制音频 → zero-shot 音色克隆
             if not custom_audio or not os.path.exists(custom_audio):
                 return None, "❌ 请先上传或录制参考音频"
-            audio_path = engine._save_with_prompt(
-                text=text,
-                prompt_audio_path=custom_audio,
-                prompt_text=custom_audio_text,
-                speed=speed,
-            )
+            # 自定义音色时强制卸载 TTS 模型（_save_with_prompt 内部若失败回退到 SFT，
+            # 必须先有干净显存，否则会触发 CUDA 断言异常）
+            _unload_tts()
+            engine = _get_tts()
+            # 兜底：如果用户没填参考音频文本，给一段默认示例，避免 zero-shot 抛异常
+            prompt_text = (custom_audio_text or "").strip() or "这是一段示例音频，用于音色克隆。"
+            try:
+                audio_path = engine._save_with_prompt(
+                    text=text,
+                    prompt_audio_path=custom_audio,
+                    prompt_text=prompt_text,
+                    speed=speed,
+                )
+            except Exception as inner_e:
+                _unload_tts()
+                logger.error(f"[TTS] zero-shot 失败: {inner_e}", exc_info=True)
+                return None, f"❌ 音色克隆失败：{inner_e}。请检查音频格式（WAV 16k 单声道最佳）或填写正确的参考文本。"
 
         # 用后立即卸载，释放显存给 LipSync
         _unload_tts()
@@ -358,15 +375,18 @@ def _get_audio_duration(path: str) -> float:
 # 步骤 4：口型合成（LipSync）
 # ===========================================================================
 
-def step4_lipsync(video_path, audio_path) -> Tuple[Optional[str], str]:
+def step4_lipsync(avatar_video, audio_path, fallback_video=None) -> Tuple[Optional[str], str]:
     """
-    使用 MuseTalk 将音频驱动的口型同步到视频上（~6-8GB 显存）。
+    使用 MuseTalk 将音频驱动的口型同步到指定形象视频上（~6-8GB 显存）。
+
+    优先级：avatar_video（用户在步骤四上传的形象视频） > fallback_video（步骤一的输入视频）
 
     加载 MuseTalk 前会通过 _unload_all_for_lipsync() 卸载所有前序模型
     （ASR/LLM/TTS），确保 MuseTalk 有充足的 GPU 显存可用。
     """
+    video_path = avatar_video or fallback_video
     if video_path is None:
-        return None, "❌ 缺少视频输入"
+        return None, "❌ 请上传数字人形象视频（或先在步骤一上传参考视频）"
     if audio_path is None:
         return None, "❌ 缺少音频输入"
 
@@ -377,6 +397,46 @@ def step4_lipsync(video_path, audio_path) -> Tuple[Optional[str], str]:
     ap = audio_path if isinstance(audio_path, str) else audio_path.name
 
     logger.info(f"[LipSync] 视频={vp}, 音频={ap}")
+
+    # 图片 → 视频转换：如果用户上传的是静态图片，先用 FFmpeg 生成
+    # 与音频等长的动态视频（zoompan 缓动），再送入 MuseTalk
+    img_ext = vp.rsplit(".", 1)[-1].lower() if "." in vp else ""
+    is_image = img_ext in ("png", "jpg", "jpeg", "bmp", "webp")
+    img_video_temp = None  # 如果有临时视频，最后需要清理
+
+    if is_image:
+        logger.info(f"[LipSync] 检测到图片格式 ({img_ext})，先转为动态视频")
+        duration = _get_audio_duration(ap)
+        if duration <= 0:
+            return None, "❌ 无法获取音频时长，图片转视频失败"
+        fps = 25
+        total_frames = max(int(duration * fps), fps)  # 至少 1 秒
+        duration_s = total_frames / fps
+
+        img_video_temp = os.path.join(
+            tempfile.gettempdir(),
+            f"img2vid_{uuid.uuid4().hex}.mp4",
+        )
+        cmd = [
+            "ffmpeg", "-y",
+            "-loop", "1", "-i", vp,
+            "-vf",
+            f"scale=2160:-1,"
+            f"zoompan=z='min(zoom+0.0005,1.3)':"
+            f"d={total_frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+            f"s=720x1280:fps={fps}",
+            "-t", str(duration_s),
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            img_video_temp,
+        ]
+        logger.info(f"[LipSync] FFmpeg: {' '.join(cmd)}")
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if proc.returncode != 0 or not os.path.exists(img_video_temp):
+            logger.error(f"[LipSync] 图片转视频失败: {proc.stderr[:500]}")
+            return None, f"❌ 图片转视频失败：{proc.stderr[:200]}"
+        logger.info(f"[LipSync] 图片→视频完成: {img_video_temp}")
+        vp = img_video_temp
 
     try:
         engine = _get_lipsync()
@@ -399,6 +459,13 @@ def step4_lipsync(video_path, audio_path) -> Tuple[Optional[str], str]:
     except Exception as e:
         logger.error(f"[LipSync] 合成失败: {e}")
         return None, f"❌ 合成失败: {e}"
+    finally:
+        # 清理图片转视频的中间产物
+        if img_video_temp and os.path.exists(img_video_temp):
+            try:
+                os.remove(img_video_temp)
+            except Exception:
+                pass
 
 
 # ===========================================================================
@@ -428,7 +495,7 @@ def run_full_pipeline(
         return None, text, "❌ 管线中断：文案提取失败", None, status1
 
     progress(0.30, desc="步骤 2/4: AI 仿写文案 (INT4)...")
-    rewritten, status2 = step2_rewrite(text, ai_mode, custom_prompt)
+    rewritten, ai_title, ai_tags, status2 = step2_rewrite(text, ai_mode, custom_prompt)
     yield None, rewritten, f"{status1}\n{status2}", None, ""
     if not rewritten:
         return None, text, "❌ 管线中断：仿写失败", None, f"{status1}\n{status2}"
@@ -444,14 +511,14 @@ def run_full_pipeline(
         return None, rewritten, "❌ 管线中断：语音合成失败", None, f"{status1}\n{status2}\n{status3}"
 
     progress(0.75, desc="步骤 4/4: 生成口型同步视频（释放 TTS 显存）...")
-    video_path, status4 = step4_lipsync(file_path, audio_path)
+    video_path, status4 = step4_lipsync(None, audio_path, fallback_video=file_path)
     yield video_path, rewritten, f"{status1}\n{status2}\n{status3}\n{status4}", audio_path, ""
 
     progress(1.0, desc="完成！")
     yield video_path, rewritten, f"{status1}\n{status2}\n{status3}\n{status4}", audio_path, "✅ 全流程完成！"
 
     # 步骤 5: 自动发布到抖音（后台线程）
-    publish_path, publish_msg = step5_publish(video_path, rewritten)
+    publish_path, publish_msg = step5_publish(video_path, rewritten, ai_title, ai_tags)
     yield video_path, rewritten, f"{status1}\n{status2}\n{status3}\n{status4}\n{publish_msg}", audio_path, "✅ 全流程完成，已启动发布！"
 
 
@@ -491,9 +558,8 @@ def step0_download_douyin(douyin_url: str) -> Tuple[Optional[str], str]:
         output_dir = os.path.join(tempfile.gettempdir(), "ip_agent_downloads")
         os.makedirs(output_dir, exist_ok=True)
 
-        # 每次都用唯一文件名，避免被覆盖
-        ts = int(time.time() * 1000)
-        output_dir = os.path.join(output_dir, f"dl_{ts}")
+        # 每次都用 UUID 目录，避免被覆盖
+        output_dir = os.path.join(output_dir, uuid.uuid4().hex)
         os.makedirs(output_dir, exist_ok=True)
 
         video_path = download_douyin_video(real_url, output_dir=output_dir)
@@ -512,7 +578,7 @@ def step0_download_douyin(douyin_url: str) -> Tuple[Optional[str], str]:
 # 步骤 5：发布到抖音
 # ===========================================================================
 
-def step5_publish(video_path, rewritten_text: str) -> Tuple[str, str]:
+def step5_publish(video_path, rewritten_text: str, ai_title: str = "", ai_tags: str = "") -> Tuple[str, str]:
     """将最终视频发布到抖音创作者平台（后台线程，不阻塞 Gradio）。
 
     使用 publish_simple.py 的半自动模式：自动上传视频 + 填写标题/文案，
@@ -523,11 +589,12 @@ def step5_publish(video_path, rewritten_text: str) -> Tuple[str, str]:
     if not os.path.exists(video_path):
         return "", f"❌ 视频文件不存在: {video_path}"
 
-    # 从仿写文案中提取标题、描述
-    title = rewritten_text.strip().split("。")[0][:50] if rewritten_text else "精彩视频"
-    # 提取标签（从前 5 个 # 开头的词）
-    tag_matches = re.findall(r'#[\w\u4e00-\u9fff]+', rewritten_text or "")
-    tags = " ".join(tag_matches[:5]) if tag_matches else ""
+    # 优先使用 AI 生成的标题和标签，其次从文案中提取
+    title = ai_title or (rewritten_text.strip().split("。")[0][:50] if rewritten_text else "精彩视频")
+    tags = ai_tags or ""
+    if not tags and rewritten_text:
+        tag_matches = re.findall(r'#[\w\u4e00-\u9fff]+', rewritten_text)
+        tags = " ".join(tag_matches[:5]) if tag_matches else ""
     desc = rewritten_text.strip()[:200] if rewritten_text else ""
 
     logger.info(f"[Publish] 视频={video_path}, 标题={title}, 标签={tags}")
@@ -645,7 +712,7 @@ PIPELINE_CSS = """
 .s0 { background: #fef3c7; color: #1f2937; } .s1 { background: #dbeafe; color: #1f2937; } .s2 { background: #ede9fe; color: #1f2937; } .s3 { background: #d1fae5; color: #1f2937; } .s4 { background: #fce7f3; color: #1f2937; }
 .pipeline-status { font-size: 0.9em; }
 #full-run-btn { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
-.douyin-row { background: #f0f9ff; border: 1px dashed #93c5fd; border-radius: 8px; padding: 12px; margin-bottom: 10px; color: #1f2937; }
+.douyin-row { background: linear-gradient(135deg, #f0f4ff 0%, #f5f3ff 100%); border: 1px solid #c7d2fe; border-radius: 12px; padding: 16px 20px; margin-bottom: 16px; color: #1f2937; box-shadow: 0 1px 3px rgba(99, 102, 241, 0.08); }
 """
 
 def create_pipeline_ui():
@@ -718,10 +785,19 @@ def create_pipeline_ui():
             with gr.Column(scale=2):
                 rewritten_text = gr.Textbox(
                     label="仿写后文案",
-                    lines=8,
+                    lines=5,
                     placeholder="点击执行仿写后显示结果...",
                     show_label=True,
                 )
+                with gr.Row():
+                    title_output = gr.Textbox(
+                        label="📌 视频标题", lines=1,
+                        placeholder="AI 自动生成的标题",
+                    )
+                    tags_output = gr.Textbox(
+                        label="🏷️ 标签", lines=1,
+                        placeholder="AI 自动生成的标签",
+                    )
 
         def toggle_prompt(mode):
             return gr.update(visible=(mode == "根据指令仿写"))
@@ -762,11 +838,12 @@ def create_pipeline_ui():
                         sources=["microphone"],
                         type="filepath",
                     )
-                    custom_audio_text = gr.Textbox(
-                        label="参考音频对应的文本（必填）",
-                        placeholder="例如：大家好，欢迎来到我的频道。",
-                        lines=2,
-                    )
+                # 参考音频对应文本：三种模式都可能用到 zero-shot，统一展示
+                custom_audio_text = gr.Textbox(
+                    label="参考音频对应的文本（不填时使用默认示例文本）",
+                    placeholder="例如：大家好，欢迎来到我的频道。",
+                    lines=2,
+                )
                 # 语速
                 speed_slider = gr.Slider(
                     value=1.0, minimum=0.5, maximum=2.0, step=0.1,
@@ -802,24 +879,16 @@ def create_pipeline_ui():
         gr.Markdown('<div class="step-header s4">🎭 步骤四：口型合成（MuseTalk）</div>')
         with gr.Row(equal_height=True):
             with gr.Column(scale=1, min_width=260):
-                # 引擎信息
-                engine_info = gr.Markdown(
-                    value="**合成引擎：MuseTalk v1.5**  \n"
-                           "高质量口型同步，需要 ~6-8GB 显存。  \n"
-                           "加载前会自动释放 ASR/LLM/TTS 的 GPU 显存。"
+                # 形象视频上传
+                avatar_video = gr.Video(
+                    label="🎭 数字人形象视频/图片",
+                    sources=["upload"],
+                    height=200,
                 )
-                # 视频质量（占位，未来扩展）
-                quality_dd = gr.Radio(
-                    choices=["快速", "标准", "高质量"],
-                    value="标准",
-                    label="输出质量",
-                )
-                # 输出信息
-                output_info = gr.Textbox(
-                    label="输出信息",
-                    value="点击 4️⃣ 生成口型视频 即可开始",
-                    interactive=False,
-                    lines=2,
+                gr.Markdown(
+                    value="上传你的数字人形象视频或图片，  \n"
+                           "音频将驱动该形象进行口型同步。  \n"
+                           "（不填则使用步骤一的参考视频）"
                 )
             with gr.Column(scale=1, min_width=140):
                 gr.Markdown("")  # spacer
@@ -883,7 +952,7 @@ def create_pipeline_ui():
         rewrite_btn.click(
             fn=step2_rewrite,
             inputs=[original_text, ai_mode, custom_prompt],
-            outputs=[rewritten_text, step_status],
+            outputs=[rewritten_text, title_output, tags_output, step_status],
         )
 
         # 步骤 3: 语音合成
@@ -916,17 +985,17 @@ def create_pipeline_ui():
             outputs=[audio_output, tts_status],
         )
 
-        # 步骤 4: 口型合成
+        # 步骤 4: 口型合成（优先使用用户上传的形象视频，回退到步骤一视频）
         lipsync_btn.click(
             fn=step4_lipsync,
-            inputs=[input_video, audio_output],
+            inputs=[avatar_video, audio_output, input_video],
             outputs=[video_output, step_status],
         )
 
         # 步骤 5: 发布到抖音
         publish_btn.click(
             fn=step5_publish,
-            inputs=[video_output, rewritten_text],
+            inputs=[video_output, rewritten_text, title_output, tags_output],
             outputs=[publish_video, publish_status],
         )
 

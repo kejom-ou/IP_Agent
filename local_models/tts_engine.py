@@ -202,6 +202,7 @@ class CosyVoiceEngine:
             return self.synthesize_raw(text, "default", speed)
 
         # 把音频重采样到模型采样率，避免 sr 不匹配
+        # 优先用 torchaudio 加载 wav；若失败（如 mp3/m4a 无后端）用 ffmpeg 转码
         try:
             import torchaudio
             wav, sr = torchaudio.load(prompt_audio_path)
@@ -219,7 +220,25 @@ class CosyVoiceEngine:
         except ImportError:
             pass  # torchaudio 不在则用 ffmpeg 兜底
         except Exception as e:
-            logger.warning(f"音频重采样失败（继续尝试）: {e}")
+            logger.warning(f"torchaudio 加载参考音频失败，尝试 ffmpeg 兜底: {e}")
+            try:
+                import subprocess
+                target_sr = self.sample_rate
+                tmp_prompt = os.path.join(
+                    tempfile.gettempdir(),
+                    f"_prompt_ffmpeg_{int(time.time() * 1000)}.wav",
+                )
+                # ffmpeg 转码为 wav 单声道 target_sr
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", prompt_audio_path,
+                     "-ac", "1", "-ar", str(target_sr), tmp_prompt],
+                    check=True, capture_output=True, timeout=30,
+                )
+                prompt_audio_path = tmp_prompt
+                logger.info(f"ffmpeg 转码成功: {tmp_prompt}")
+            except Exception as fe:
+                logger.error(f"ffmpeg 兜底也失败: {fe}")
+                # 不抛出，让 zero-shot 自己用原路径尝试（CosyVoice 内部也可能处理）
 
         # 默认 prompt 文本（用户没填时）
         if not prompt_text or not prompt_text.strip():

@@ -13,6 +13,7 @@ env/
 
 # 本地模型文件（体积大，需自行准备）
 pretrained_models/
+models/
 
 # IDE
 .idea/
