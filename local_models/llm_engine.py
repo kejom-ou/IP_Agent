@@ -1,10 +1,11 @@
 """
 本地 LLM 引擎 — Transformers 原生推理 Qwen2.5（从本地加载模型）
-支持 INT4 量化（bitsandbytes），显存仅 ~0.5GB
+支持 FP16 / INT4，FP16 ~1GB 显存，INT4 ~0.5GB 显存
 """
 
 import gc
 import logging
+import re
 import warnings
 from typing import Optional
 
@@ -25,15 +26,73 @@ except ImportError:
     logger.info("bitsandbytes 未安装，LLM 将使用 FP16（~2GB 显存）")
 
 # ---------------------------------------------------------------------------
+# 文本清洗：过滤 emoji 和特殊字符（仿写后处理，确保不给 TTS 喂怪字符）
+# ---------------------------------------------------------------------------
+
+_EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001F300-\U0001F5FF"
+    "\U0001F600-\U0001F64F"
+    "\U0001F680-\U0001F6FF"
+    "\U0001F700-\U0001F77F"
+    "\U0001F780-\U0001F7FF"
+    "\U0001F800-\U0001F8FF"
+    "\U0001F900-\U0001F9FF"
+    "\U0001FA00-\U0001FAFF"
+    "\U00002600-\U000027BF"
+    "\U00002B00-\U00002BFF"
+    "\U0001F1E6-\U0001F1FF"
+    "\U0001F000-\U0001F02F"
+    "\U0001F0A0-\U0001F0FF"
+    "\U0000FE00-\U0000FE0F"
+    "\U0000200D"
+    "\U00002702-\U000027B0"
+    "]+",
+    flags=re.UNICODE,
+)
+
+_SPECIAL_SYMBOLS_PATTERN = re.compile(
+    "["
+    "★☆◆◇■□●○▲△▼▽→←↑↓⇒⇐"
+    "①②③④⑤⑥⑦⑧⑨⑩⑴⑵⑶⑷⑸⑹⑺⑻⑼⑽"
+    "❶❷❸❹❺❻❼❽❾❿"
+    "─━│┃…·•・【】〖〗⟨⟩©®™"
+    "✅❌❎🔗🎬🚀📥📹🎭✍️🔊📌"
+    "]+",
+    flags=re.UNICODE,
+)
+
+
+def clean_text_for_tts(text: str) -> str:
+    """去除 emoji 和特殊装饰符号，保留中文/英文/数字和标准标点。"""
+    if not text:
+        return text
+    text = _EMOJI_PATTERN.sub("", text)
+    text = _SPECIAL_SYMBOLS_PATTERN.sub("", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{2,}", "\n", text)
+    return text.strip()
+
+
+# ---------------------------------------------------------------------------
 # 系统提示词
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT_AUTO = """你是一个专业的口播文案改写助手。请根据以下规则改写文案：
-1. 保留原文核心信息和关键卖点
-2. 优化语言表达，使文案更口语化、更有感染力
-3. 保持原文的段落结构
-4. 可以适当调整语序和用词，但不能改变原意
-5. 输出只包含改写后的文案，不要添加任何解释说明"""
+SYSTEM_PROMPT_AUTO = """你是一个专业的短视频口播文案改写师。你的任务是对用户提供的文案进行深度改写，绝对不能直接复制原文。
+
+改写要求：
+1. 调整句子语序，把原文的前后句顺序打乱重组
+2. 至少替换 60% 的用词（保留关键名词即可），用不同但等价的表达方式
+3. 把书面化表达改成口语化短句，适合口播朗读
+4. 可以增减语气词（"说真的""你想想""对不对"等）来增强互动感
+5. 核心信息和数据必须保留，但表达方式必须完全不同
+
+禁止事项：
+- 禁止使用任何 emoji 表情符号（如 😊🎉👍 等）
+- 禁止使用特殊 Unicode 字符、装饰符号（如 ★◆→①② 等）
+- 只使用简体中文、英文、数字和标准中文标点符号（，。！？；：""''）
+
+输出格式：只输出改写后的完整文案，不要输出"改写后："等任何前缀，不要加解释。"""
 
 SYSTEM_PROMPT_CUSTOM = """你是一个专业的口播文案改写助手。请严格按照用户给出的指令改写文案。
 输出只包含改写后的文案，不要添加任何解释说明。"""
@@ -130,6 +189,7 @@ class TransformersLLM:
                     temperature=temperature,
                     do_sample=temperature > 0,
                     top_p=0.9,
+                    repetition_penalty=1.15,
                     pad_token_id=self.tokenizer.eos_token_id,
                     use_cache=True,
                 )
@@ -175,7 +235,7 @@ class LocalLLMEngine:
 
         if mode == "AI自动仿写":
             system_prompt = SYSTEM_PROMPT_AUTO
-            user_prompt = f"请改写以下文案：\n\n{original_text}"
+            user_prompt = f"请对下面的文案进行深度改写，调整语序、替换用词、口语化表达，但保留核心信息。输出必须和原文完全不同：\n\n{original_text}"
         else:
             system_prompt = SYSTEM_PROMPT_CUSTOM
             instruction = custom_prompt or "请优化这段文案的表达"
@@ -186,7 +246,10 @@ class LocalLLMEngine:
             {"role": "user", "content": user_prompt},
         ]
 
-        result = self.engine.generate(messages, temperature=0.7, max_tokens=2048)
+        result = self.engine.generate(messages, temperature=0.9, max_tokens=2048)
+        # 清洗 LLM 输出中的 emoji / 特殊字符，避免影响下游 TTS
+        if result:
+            result = clean_text_for_tts(result)
         return result if result else original_text
 
     def unload(self):

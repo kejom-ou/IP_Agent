@@ -1,12 +1,15 @@
 
+
 """
 本地语音合成引擎（CosyVoice AutoModel + 本地模型）
 """
 import gc
 import logging
 import os
+import re
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional, List, Tuple, Generator, Dict
 
@@ -26,6 +29,81 @@ from cosyvoice.cli.cosyvoice import AutoModel
 from local_models.config import TTS_CONFIG
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# 文本清洗：过滤 emoji 和特殊字符，避免 TTS 合成出怪声 / 卡住
+# ---------------------------------------------------------------------------
+
+# 匹配所有 emoji 区段（包括组合序列）和常见装饰符号
+_EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001F300-\U0001F5FF"  # 符号 & 表情
+    "\U0001F600-\U0001F64F"  # 表情符号
+    "\U0001F680-\U0001F6FF"  # 交通 & 地图
+    "\U0001F700-\U0001F77F"  # 炼金术符号
+    "\U0001F780-\U0001F7FF"  # 几何形状扩展
+    "\U0001F800-\U0001F8FF"  # 补充箭头
+    "\U0001F900-\U0001F9FF"  # 补充符号 & 表情
+    "\U0001FA00-\U0001FAFF"  # 扩展符号 & 表情
+    "\U00002600-\U000027BF"  # 杂项符号 / 装饰
+    "\U00002B00-\U00002BFF"  # 杂项符号 & 箭头
+    "\U0001F1E6-\U0001F1FF"  # 国旗
+    "\U0001F000-\U0001F02F"  # 麻将 / 扑克
+    "\U0001F0A0-\U0001F0FF"  # 扑克牌
+    "\U0000FE00-\U0000FE0F"  # 变体选择符（emoji 组合）
+    "\U0000200D"             # 零宽连接符
+    "\U00002702-\U000027B0"  # 装饰符号
+    "]+",
+    flags=re.UNICODE,
+)
+
+# 其它常见特殊符号：星号、方头括号、箭头、圈数字等
+_SPECIAL_SYMBOLS_PATTERN = re.compile(
+    "["
+    "★☆"
+    "◆◇■□●○"
+    "▲△▼▽"
+    "→←↑↓⇒⇐"
+    "①②③④⑤⑥⑦⑧⑨⑩"
+    "⑴⑵⑶⑷⑸⑹⑺⑻⑼⑽"
+    "❶❷❸❹❺❻❼❽❾❿"
+    "─━│┃"
+    "…"
+    "·•・"
+    "【】〖〗"
+    "⟨⟩"
+    "©®™"
+    "✅❌❎"
+    "🔗🎬🚀📥📹🎭✍️🔊📌"
+    "]+",
+    flags=re.UNICODE,
+)
+
+
+def clean_text_for_tts(text: str) -> str:
+    """
+    清洗送给 TTS 的文本：去除 emoji 和特殊装饰符号。
+
+    保留：
+      - 中文字符（CJK）
+      - 英文字母 / 数字
+      - 标准中文标点（，。！？；：""''【】()、《》——…）
+      - 标准英文标点（,.!?:;'"()-）
+      - 空白字符
+    """
+    if not text:
+        return text
+
+    # 1) 先去掉 emoji
+    text = _EMOJI_PATTERN.sub("", text)
+    # 2) 再去掉装饰符号
+    text = _SPECIAL_SYMBOLS_PATTERN.sub("", text)
+    # 3) 折叠连续空白
+    text = re.sub(r"[ \t]+", " ", text)
+    # 4) 折叠连续换行
+    text = re.sub(r"\n{2,}", "\n", text)
+    return text.strip()
 
 
 class CosyVoiceEngine:
@@ -100,6 +178,79 @@ class CosyVoiceEngine:
                 wav_seg = wav_seg.unsqueeze(-1)
             wav_list.append(wav_seg)
         return np.concatenate(wav_list, axis=0)
+
+    def synthesize_with_prompt(
+        self, text: str, prompt_audio_path: str, prompt_text: str = "",
+        speed: float = 1.0,
+    ) -> Optional[np.ndarray]:
+        """使用参考音频做 zero-shot 音色克隆（CosyVoice-300M-SFT 不支持时回退到 SFT）。
+
+        Args:
+            text: 待合成文本
+            prompt_audio_path: 参考音频 wav 路径（用户上传 / 录音）
+            prompt_text: 参考音频对应的文本（zero-shot 需要）
+            speed: 语速
+
+        Returns:
+            原始音频 numpy 数组 [samples, 1]
+        """
+        if self.model is None and not self.load_model():
+            return None
+
+        if not prompt_audio_path or not os.path.exists(prompt_audio_path):
+            logger.warning("未提供参考音频，回退到默认 SFT 音色")
+            return self.synthesize_raw(text, "default", speed)
+
+        # 把音频重采样到模型采样率，避免 sr 不匹配
+        try:
+            import torchaudio
+            wav, sr = torchaudio.load(prompt_audio_path)
+            target_sr = self.sample_rate
+            if sr != target_sr:
+                resampler = torchaudio.transforms.Resample(sr, target_sr)
+                wav = resampler(wav)
+                # 写回临时文件
+                tmp_prompt = os.path.join(
+                    tempfile.gettempdir(),
+                    f"_prompt_resampled_{int(time.time() * 1000)}.wav",
+                )
+                torchaudio.save(tmp_prompt, wav, target_sr)
+                prompt_audio_path = tmp_prompt
+        except ImportError:
+            pass  # torchaudio 不在则用 ffmpeg 兜底
+        except Exception as e:
+            logger.warning(f"音频重采样失败（继续尝试）: {e}")
+
+        # 默认 prompt 文本（用户没填时）
+        if not prompt_text or not prompt_text.strip():
+            prompt_text = "这是一段示例音频，用于音色克隆。"
+
+        # 尝试 zero-shot
+        try:
+            if hasattr(self.model, "inference_zero_shot"):
+                logger.info("[ZeroShot] 使用参考音频做音色克隆")
+                result = list(self.model.inference_zero_shot(
+                    text, prompt_text, prompt_audio_path,
+                    zero_shot_spk_id="user_uploaded",
+                    stream=False, speed=speed,
+                ))
+                if result:
+                    wav_list = []
+                    for seg in result:
+                        w = seg["tts_speech"].cpu()
+                        if w.ndim == 2:
+                            w = w.T
+                        else:
+                            w = w.unsqueeze(-1)
+                        wav_list.append(w)
+                    return np.concatenate(wav_list, axis=0)
+        except Exception as e:
+            logger.warning(f"Zero-shot 失败，回退 SFT: {e}")
+
+        # 回退
+        logger.info("[SFT] Zero-shot 不可用，使用默认中文女声")
+        return self.synthesize_raw(text, "default", speed)
+
 
     # ---- 推理：逐段合成 + 静音间隔 + 时间戳 ----
 
@@ -182,17 +333,43 @@ class CosyVoiceEngine:
         self, text: str, speaker: str = "default", speed: float = 1.0,
         output_path: Optional[str] = None,
     ) -> Optional[str]:
-        """兼容旧接口：整段文本合成（内部复用 synthesize_segments）。"""
-        # 按空行分段，无间隔，以保持与原行为一致
-        segments = [s.strip() for s in text.split("\n\n") if s.strip()]
+        """整段文本合成（按中文句号分句，逐句独立推理避免长文本 OOM）。"""
+        # 按句号分句，保留句号在每句末尾
+        segments = [s.strip() for s in re.split(r'(?<=。)', text) if s.strip()]
         if not segments:
             segments = [text.strip()]
         result = self.synthesize_segments(
-            segments, speaker, speed, gap_ms=0, output_path=output_path,
+            segments, speaker, speed, gap_ms=300, output_path=output_path,
         )
         if result:
             return result[0]
         return None
+
+    def _save_with_prompt(
+        self, text: str, prompt_audio_path: str, prompt_text: str = "",
+        speed: float = 1.0,
+    ) -> Optional[str]:
+        """Zero-shot 音色克隆 + 写出 wav 文件，返回文件路径"""
+        wav = self.synthesize_with_prompt(
+            text=text,
+            prompt_audio_path=prompt_audio_path,
+            prompt_text=prompt_text,
+            speed=speed,
+        )
+        if wav is None:
+            return None
+        out_path = os.path.join(
+            tempfile.gettempdir(),
+            f"tts_cloned_{int(time.time() * 1000)}.wav",
+        )
+        try:
+            import soundfile as sf
+            sf.write(out_path, wav, self.sample_rate)
+            logger.info(f"[TTS] 写出音频: {out_path}")
+            return out_path
+        except Exception as e:
+            logger.error(f"写 wav 失败: {e}")
+            return None
 
     def _resolve_speaker(self, speaker: str) -> str:
         """将用户输入映射为 CosyVoice 能识别的发音人。"""
@@ -223,8 +400,17 @@ class CosyVoiceEngine:
     # ---- 卸载 ----
 
     def unload(self):
+        """卸载模型并释放显存。
+
+        Windows 上 del torch 模型对象时，ProactorEventLoop 会主动关闭底层 socket，
+        这会触发 ConnectionResetError (10054)。这里的 gc.collect() 会立刻触发该清理，
+        导致看到 "主机强迫关闭了一个现有的连接" 的告警。属于无害的 Windows 平台噪音。
+        """
         if self.model is not None:
-            del self.model
+            try:
+                del self.model
+            except Exception as e:
+                logger.debug(f"卸载 CosyVoice 模型时小警告: {e}")
             self.model = None
         gc.collect()
         if torch.cuda.is_available():

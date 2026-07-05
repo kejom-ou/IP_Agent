@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -330,18 +331,196 @@ class DouyinCrawler:
         return url
 
     # ------------------------------------------------------------------
-    # HTTP 下载
+    # HTTP 多线程分块下载
     # ------------------------------------------------------------------
 
+    # 并行下载线程数（CDN 出口带宽一般 4-8 线程即可跑满）
+    DOWNLOAD_WORKERS = 8
+    # 每块最小 512KB，避免分块过碎
+    MIN_CHUNK_SIZE = 512 * 1024
+
     def _http_download_video(self, url: str, save_path: str) -> bool:
-        """HTTP 流式下载视频"""
+        """多线程分块下载视频（基于 HTTP Range）"""
+        t0 = time.time()
+
+        try:
+            # Step 1: 探测文件总大小 & 是否支持 Range
+            total_size, supports_range = self._probe_url(url)
+            if total_size is None:
+                logger.warning("无法获取文件大小，回退到单线程流式下载")
+                return self._http_download_single(url, save_path)
+
+            if not supports_range:
+                logger.warning("CDN 不支持 Range 请求，使用单线程流式下载")
+                return self._http_download_single(url, save_path)
+
+            # Step 2: 分块下载
+            chunk_size = max(
+                self.MIN_CHUNK_SIZE,
+                total_size // self.DOWNLOAD_WORKERS,
+            )
+            # 计算分块边界，覆盖整个文件
+            ranges = []
+            start = 0
+            while start < total_size:
+                end = min(start + chunk_size - 1, total_size - 1)
+                ranges.append((start, end))
+                start = end + 1
+
+            # 如果分块太少或只有一个，直接用单线程
+            if len(ranges) <= 1:
+                return self._http_download_single(url, save_path)
+
+            logger.info(
+                f"  [多线程] 文件大小: {total_size / 1024 / 1024:.1f}MB, "
+                f"分 {len(ranges)} 块, {self.DOWNLOAD_WORKERS} 线程并行下载"
+            )
+
+            # Step 3: 并行下载各分块
+            chunk_files = []
+            futures = {}
+            with ThreadPoolExecutor(max_workers=self.DOWNLOAD_WORKERS) as executor:
+                for idx, (range_start, range_end) in enumerate(ranges):
+                    tmp_path = save_path + f".part{idx:03d}"
+                    chunk_files.append((idx, range_start, tmp_path))
+                    futures[
+                        executor.submit(
+                            self._download_chunk,
+                            url, range_start, range_end, tmp_path, idx,
+                        )
+                    ] = idx
+
+                last_progress = -5  # 每 5% 打印一次
+                downloaded = 0
+                for future in as_completed(futures):
+                    idx = futures[future]
+                    try:
+                        ok, size = future.result()
+                        if not ok:
+                            logger.error(f"  [块 {idx}] 下载失败，终止")
+                            # 清理临时文件
+                            for _, _, fp in chunk_files:
+                                if os.path.exists(fp):
+                                    os.remove(fp)
+                            return False
+                        downloaded += size
+                        progress = int(downloaded / total_size * 100)
+                        if progress - last_progress >= 5:
+                            logger.info(
+                                f"  [进度] {progress}% ({downloaded / 1024 / 1024:.1f}/"
+                                f"{total_size / 1024 / 1024:.1f}MB)"
+                            )
+                            last_progress = progress
+                    except Exception as e:
+                        logger.error(f"  [块 {idx}] 异常: {e}")
+                        for _, _, fp in chunk_files:
+                            if os.path.exists(fp):
+                                os.remove(fp)
+                        return False
+
+            # Step 4: 按顺序合并分块
+            logger.info("  [合并] 拼接各分块...")
+            with open(save_path, "wb") as out:
+                for _, _, tmp_path in sorted(chunk_files, key=lambda x: x[0]):
+                    with open(tmp_path, "rb") as inp:
+                        while True:
+                            data = inp.read(4 * 1024 * 1024)  # 4MB 读取
+                            if not data:
+                                break
+                            out.write(data)
+                    os.remove(tmp_path)  # 合并完立即删除临时文件
+
+            elapsed = time.time() - t0
+            size_mb = total_size / (1024 * 1024)
+            speed = size_mb / elapsed if elapsed > 0 else 0
+            logger.info(f"  [OK] 下载完成: {size_mb:.1f}MB ({elapsed:.1f}s, {speed:.1f}MB/s)")
+            return True
+
+        except Exception as e:
+            logger.error(f"多线程下载异常: {e}", exc_info=True)
+            # 清理可能遗留的临时文件
+            for f in Path(save_path).parent.glob(Path(save_path).name + ".part*"):
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+            return False
+
+    def _probe_url(self, url: str) -> Tuple[Optional[int], bool]:
+        """探测文件大小和是否支持 Range"""
+        headers = {
+            "User-Agent": MOBILE_UA,
+            "Referer": "https://www.douyin.com/",
+            "Range": "bytes=0-0",
+        }
+        try:
+            resp = requests.get(
+                url,
+                headers=headers,
+                cookies=getattr(self, "_page_cookies", None),
+                timeout=15,
+                allow_redirects=True,
+            )
+            # 206 = 支持 Range; 200 = 不支持
+            supports_range = (resp.status_code == 206)
+            content_range = resp.headers.get("Content-Range", "")
+            if content_range:
+                m = re.search(r"/\s*(\d+)", content_range)
+                if m:
+                    total = int(m.group(1))
+                    return total, True
+            content_length = resp.headers.get("Content-Length")
+            if content_length:
+                return int(content_length), supports_range
+            return None, supports_range
+        except Exception as e:
+            logger.warning(f"探测失败: {e}")
+            return None, False
+
+    def _download_chunk(
+        self, url: str, range_start: int, range_end: int,
+        save_path: str, chunk_idx: int,
+    ) -> Tuple[bool, int]:
+        """下载单个分块，返回 (成功, 实际字节数)"""
         headers = {
             "User-Agent": MOBILE_UA,
             "Referer": "https://www.douyin.com/",
             "Accept": "*/*",
-            "Accept-Encoding": "identity",  # 不压缩，直接获取原始流
+            "Accept-Encoding": "identity",
+            "Range": f"bytes={range_start}-{range_end}",
         }
+        try:
+            resp = requests.get(
+                url,
+                headers=headers,
+                cookies=getattr(self, "_page_cookies", None),
+                stream=True,
+                timeout=120,
+                allow_redirects=True,
+            )
+            if resp.status_code not in (200, 206):
+                logger.error(f"  [块 {chunk_idx}] HTTP {resp.status_code}")
+                return False, 0
 
+            written = 0
+            with open(save_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+                        written += len(chunk)
+            return True, written
+        except Exception as e:
+            logger.error(f"  [块 {chunk_idx}] 下载异常: {e}")
+            return False, 0
+
+    def _http_download_single(self, url: str, save_path: str) -> bool:
+        """单线程流式下载（CDN 不支持 Range 时的回退方案）"""
+        headers = {
+            "User-Agent": MOBILE_UA,
+            "Referer": "https://www.douyin.com/",
+            "Accept": "*/*",
+            "Accept-Encoding": "identity",
+        }
         try:
             t0 = time.time()
             resp = requests.get(
@@ -352,7 +531,6 @@ class DouyinCrawler:
                 timeout=120,
                 allow_redirects=True,
             )
-            # 接受 200 和 206（部分内容）两种状态
             if resp.status_code not in (200, 206):
                 logger.error(f"下载失败: status={resp.status_code}")
                 return False
@@ -366,11 +544,18 @@ class DouyinCrawler:
             total_size = int(content_length) if content_length else None
 
             downloaded = 0
+            last_log = 0
             with open(save_path, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=1024 * 1024):
                     if chunk:
                         f.write(chunk)
                         downloaded += len(chunk)
+                        # 每 10% 打印进度
+                        if total_size:
+                            pct = int(downloaded / total_size * 100)
+                            if pct - last_log >= 10:
+                                logger.info(f"  [进度] {pct}%")
+                                last_log = pct
 
             elapsed = time.time() - t0
             size_mb = downloaded / (1024 * 1024)

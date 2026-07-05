@@ -9,16 +9,17 @@
 使用方法:
     python local_models/pipeline_gradio.py
 
-8GB 显存适配策略（串行加载）：
-  - ASR 固定在 CPU（~2GB 内存）
-  - LLM INT4 量化（~0.5GB 显存），用后卸载
+8GB 显存适配策略（串行加载 + MuseTalk 前激进清理）：
+  - ASR → CPU/GPU（~1-2GB），用后保持
+  - LLM FP16（~1GB 显存），用后卸载
   - TTS Lite（~1-2GB 显存），用后卸载
-  - LipSync（~6GB 显存），最后加载
-  → 峰值显存 ~6GB ✅
+  - LipSync MuseTalk（~6-8GB 显存），加载前卸载 ASR/LLM/TTS
+  → 峰值显存 ~8GB ✅
 ============================================================
 """
 
 import os
+import re
 import sys
 import time
 import tempfile
@@ -26,6 +27,24 @@ import logging
 import subprocess
 from pathlib import Path
 from typing import Optional, Tuple
+
+# ------------------------------------------------------------
+# Windows: 切换到 SelectorEventLoop，抑制 Proactor socket 告警
+# ------------------------------------------------------------
+# Windows 默认 asyncio 事件循环是 ProactorEventLoop。
+# 在 del PyTorch 模型 + gc.collect() 时，Proactor 会主动关闭底层 socket，
+# 触发 ConnectionResetError (10054) 告警：
+#   "Exception in callback _ProactorBasePipeTransport._call_connection_lost"
+# 该错误发生在 Python 内部事件循环的回调中，用户代码无法捕获。
+# 解法：在任何 asyncio / gradio 导入前，切换到 SelectorEventLoop。
+# 实际功能完全正常（socket 已经关闭了），只是日志污染。
+# ------------------------------------------------------------
+if sys.platform == "win32":
+    import asyncio as _asyncio
+    try:
+        _asyncio.set_event_loop_policy(_asyncio.WindowsSelectorEventLoopPolicy())
+    except Exception:
+        pass
 
 import gradio as gr
 
@@ -57,6 +76,18 @@ def _get_asr():
         _asr_engine = ASREngine()
         _asr_engine.load()
     return _asr_engine
+
+
+def _unload_asr():
+    """卸载 ASR，释放 GPU 显存（ASR 可能占用 ~1-2GB）"""
+    global _asr_engine
+    if _asr_engine:
+        _asr_engine.unload()
+        _asr_engine = None
+        logger.info("[显存管理] ASR 已卸载")
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 def _get_llm():
@@ -95,10 +126,40 @@ def _unload_tts():
         logger.info("[显存管理] TTS 已卸载")
 
 
+def _unload_all_for_lipsync():
+    """激进清理：加载 MuseTalk 前，强制卸载所有前序模型 + 清空 GPU 缓存
+    
+    MuseTalk 需要 ~6-8GB 独享显存。此函数会：
+    1. 卸载 ASR / LLM / TTS（如果还在 GPU 上）
+    2. 调用 gc.collect() 清理 Python 对象
+    3. 调用 torch.cuda.empty_cache() 释放 PyTorch 缓存
+    """
+    import gc
+    import torch
+    logger.info("[显存管理] 🔄 加载 MuseTalk 前执行显存清理...")
+    _unload_llm()
+    _unload_tts()
+    _unload_asr()
+    gc.collect()
+    if torch.cuda.is_available():
+        before = torch.cuda.memory_allocated() / 1024**3
+        torch.cuda.empty_cache()
+        after = torch.cuda.memory_allocated() / 1024**3
+        logger.info(f"[显存管理] CUDA 缓存已清空，当前占用: {after:.2f} GB (清理前: {before:.2f} GB)")
+    else:
+        logger.info("[显存管理] 无 CUDA 设备，跳过 GPU 清理")
+
+
 def _get_lipsync():
+    """懒加载 LipSync 引擎（仅 MuseTalk，高质量 ~6-8GB 显存）
+    
+    加载前会先卸载所有其他 GPU 模型（ASR/LLM/TTS），确保 MuseTalk 有充足显存。
+    """
     global _lipsync_engine
     if _lipsync_engine is None:
-        from local_models.lipsync import MuseTalkEngine
+        # 激进释放所有 GPU 显存
+        _unload_all_for_lipsync()
+        from local_models.musetalk_engine import MuseTalkEngine
         _lipsync_engine = MuseTalkEngine()
         _lipsync_engine.load()
     return _lipsync_engine
@@ -216,10 +277,24 @@ def step2_rewrite(text: str, ai_mode: str, custom_prompt: str) -> Tuple[str, str
 # 步骤 3：语音合成（TTS）
 # ===========================================================================
 
-def step3_generate_audio(text: str, speed: float) -> Tuple[Optional[str], str]:
+def step3_generate_audio(
+    text: str,
+    speed: float,
+    voice_mode: str,
+    speaker: str,
+    custom_audio: Optional[str],
+    custom_audio_text: str,
+) -> Tuple[Optional[str], str]:
     """
-    使用 CosyVoice Lite 将文案合成为语音（~1-2GB 显存）。
-    合成完成后自动卸载，释放显存给 LipSync。
+    使用 CosyVoice 将文案合成为语音（~1-2GB 显存）。
+
+    Args:
+        text: 待合成文案
+        speed: 语速倍率
+        voice_mode: 音色来源（"内置音色" / "上传音频" / "录制音频"）
+        speaker: 内置音色名（voice_mode=内置音色 时使用）
+        custom_audio: 用户上传/录制的参考音频路径
+        custom_audio_text: 参考音频对应的文本（zero-shot 必需）
     """
     if not text or not text.strip():
         return None, "❌ 文案为空"
@@ -227,15 +302,30 @@ def step3_generate_audio(text: str, speed: float) -> Tuple[Optional[str], str]:
     # 确保 LLM 已卸载，释放显存
     _unload_llm()
 
-    logger.info(f"[TTS] 合成语音，语速={speed}")
+    logger.info(f"[TTS] 合成语音，语速={speed}, 模式={voice_mode}")
+    if voice_mode != "内置音色":
+        logger.info(f"[TTS] 参考音频: {custom_audio}, 文本: {custom_audio_text[:30] if custom_audio_text else '(空)'}...")
 
     try:
         engine = _get_tts()
-        audio_path = engine.synthesize(
-            text=text,
-            speaker="default",
-            speed=speed,
-        )
+
+        if voice_mode == "内置音色":
+            audio_path = engine.synthesize(
+                text=text,
+                speaker=speaker or "default",
+                speed=speed,
+            )
+        else:
+            # 上传/录制音频 → zero-shot 音色克隆
+            if not custom_audio or not os.path.exists(custom_audio):
+                return None, "❌ 请先上传或录制参考音频"
+            audio_path = engine._save_with_prompt(
+                text=text,
+                prompt_audio_path=custom_audio,
+                prompt_text=custom_audio_text,
+                speed=speed,
+            )
+
         # 用后立即卸载，释放显存给 LipSync
         _unload_tts()
 
@@ -246,7 +336,7 @@ def step3_generate_audio(text: str, speed: float) -> Tuple[Optional[str], str]:
             return None, "❌ 语音合成失败"
     except Exception as e:
         _unload_tts()
-        logger.error(f"[TTS] 合成失败: {e}")
+        logger.error(f"[TTS] 合成失败: {e}", exc_info=True)
         return None, f"❌ 合成失败: {e}"
 
 
@@ -270,15 +360,18 @@ def _get_audio_duration(path: str) -> float:
 
 def step4_lipsync(video_path, audio_path) -> Tuple[Optional[str], str]:
     """
-    使用 MuseTalk 将音频驱动的口型同步到视频上（~6GB 显存）。
+    使用 MuseTalk 将音频驱动的口型同步到视频上（~6-8GB 显存）。
+
+    加载 MuseTalk 前会通过 _unload_all_for_lipsync() 卸载所有前序模型
+    （ASR/LLM/TTS），确保 MuseTalk 有充足的 GPU 显存可用。
     """
     if video_path is None:
         return None, "❌ 缺少视频输入"
     if audio_path is None:
         return None, "❌ 缺少音频输入"
 
-    # 确保 TTS 已卸载，释放显存
-    _unload_tts()
+    # 确保所有前序模型已卸载（TTS/LLM/ASR 全部移出 GPU）
+    _unload_all_for_lipsync()
 
     vp = video_path if isinstance(video_path, str) else video_path.name
     ap = audio_path if isinstance(audio_path, str) else audio_path.name
@@ -320,8 +413,8 @@ def run_full_pipeline(
     progress=gr.Progress(),
 ):
     """
-    一键执行完整管线（串行加载/卸载，8GB 显存适配）：
-      ASR(CPU) → LLMINT4(0.5GB)→卸载 → TTS(4GB)→卸载 → LipSync(6GB)
+    一键执行完整管线（串行加载/卸载，8-10GB 显存适配）：
+      ASR → LLM(INT4, 0.5GB) → 卸载 → TTS(1-2GB) → 卸载 → MuseTalk(6-8GB)
     """
     if input_video is None:
         return None, "", "", None, "❌ 请先上传视频"
@@ -341,7 +434,11 @@ def run_full_pipeline(
         return None, text, "❌ 管线中断：仿写失败", None, f"{status1}\n{status2}"
 
     progress(0.55, desc="步骤 3/4: 合成语音（释放 LLM 显存）...")
-    audio_path, status3 = step3_generate_audio(rewritten, speed)
+    audio_path, status3 = step3_generate_audio(
+        text=rewritten, speed=speed,
+        voice_mode="内置音色", speaker="中文女",
+        custom_audio=None, custom_audio_text="",
+    )
     yield None, rewritten, f"{status1}\n{status2}\n{status3}", audio_path, ""
     if not audio_path:
         return None, rewritten, "❌ 管线中断：语音合成失败", None, f"{status1}\n{status2}\n{status3}"
@@ -352,6 +449,118 @@ def run_full_pipeline(
 
     progress(1.0, desc="完成！")
     yield video_path, rewritten, f"{status1}\n{status2}\n{status3}\n{status4}", audio_path, "✅ 全流程完成！"
+
+    # 步骤 5: 自动发布到抖音（后台线程）
+    publish_path, publish_msg = step5_publish(video_path, rewritten)
+    yield video_path, rewritten, f"{status1}\n{status2}\n{status3}\n{status4}\n{publish_msg}", audio_path, "✅ 全流程完成，已启动发布！"
+
+
+# ===========================================================================
+# 步骤 0：抖音链接下载
+# ===========================================================================
+
+def step0_download_douyin(douyin_url: str) -> Tuple[Optional[str], str]:
+    """下载抖音视频，返回视频路径
+
+    支持直接粘贴抖音分享文本（含中文标题与短链混合的内容），
+    自动从中提取真实 https 链接。
+    """
+    if not douyin_url or not douyin_url.strip():
+        return None, "请输入抖音链接"
+
+    raw = douyin_url.strip()
+    logger.info(f"[Download] 原始输入: {raw[:80]}...")
+
+    try:
+        from local_models.douyin_crawler import (
+            DouyinCrawler,
+            download_douyin_video,
+        )
+
+        # 从分享文本中提取真实链接（兼容 "3.00 :2pm y@G.ic ...  https://v.douyin.com/xxx/"）
+        real_url = DouyinCrawler.extract_share_url(raw)
+        if not real_url:
+            # 兜底：用户可能直接粘贴了纯链接，做一次宽松校验
+            if re.search(r"https?://", raw):
+                real_url = re.search(r"https?://\S+", raw).group().rstrip(".,;!?，。；！？'\")]")
+            else:
+                return None, "❌ 输入内容中未找到抖音链接，请粘贴形如 https://v.douyin.com/xxxxx/ 的链接"
+
+        logger.info(f"[Download] 解析出链接: {real_url}")
+
+        output_dir = os.path.join(tempfile.gettempdir(), "ip_agent_downloads")
+        os.makedirs(output_dir, exist_ok=True)
+
+        # 每次都用唯一文件名，避免被覆盖
+        ts = int(time.time() * 1000)
+        output_dir = os.path.join(output_dir, f"dl_{ts}")
+        os.makedirs(output_dir, exist_ok=True)
+
+        video_path = download_douyin_video(real_url, output_dir=output_dir)
+        if video_path and os.path.exists(video_path):
+            size_mb = os.path.getsize(video_path) / (1024 * 1024)
+            logger.info(f"[Download] 完成: {video_path}")
+            return video_path, f"✅ 下载完成 ({size_mb:.1f}MB): {os.path.basename(video_path)}"
+        else:
+            return None, "❌ 下载失败，请检查链接是否有效或网络是否通畅"
+    except Exception as e:
+        logger.error(f"[Download] 失败: {e}", exc_info=True)
+        return None, f"❌ 下载失败: {e}"
+
+
+# ===========================================================================
+# 步骤 5：发布到抖音
+# ===========================================================================
+
+def step5_publish(video_path, rewritten_text: str) -> Tuple[str, str]:
+    """将最终视频发布到抖音创作者平台（后台线程，不阻塞 Gradio）。
+
+    使用 publish_simple.py 的半自动模式：自动上传视频 + 填写标题/文案，
+    用户在浏览器中手动点击「发布」按钮。
+    """
+    if video_path is None:
+        return "", "❌ 请先生成口型视频（步骤四）"
+    if not os.path.exists(video_path):
+        return "", f"❌ 视频文件不存在: {video_path}"
+
+    # 从仿写文案中提取标题、描述
+    title = rewritten_text.strip().split("。")[0][:50] if rewritten_text else "精彩视频"
+    # 提取标签（从前 5 个 # 开头的词）
+    tag_matches = re.findall(r'#[\w\u4e00-\u9fff]+', rewritten_text or "")
+    tags = " ".join(tag_matches[:5]) if tag_matches else ""
+    desc = rewritten_text.strip()[:200] if rewritten_text else ""
+
+    logger.info(f"[Publish] 视频={video_path}, 标题={title}, 标签={tags}")
+
+    # 在后台线程中运行 Playwright（不阻塞 Gradio UI）
+    import threading
+
+    def _do_publish():
+        try:
+            sys.path.insert(0, str(ROOT_DIR))
+            import publish_simple
+            # 确保 profile 目录在项目根下
+            profile_dir = os.path.join(str(ROOT_DIR), ".douyin_browser_profile")
+            publish_simple.PROFILE_DIR = profile_dir
+            ok = publish_simple.run(
+                video_path=os.path.abspath(video_path),
+                title=title,
+                tags=tags,
+                desc=desc,
+            )
+            logger.info(f"[Publish] 发布流程结束, success={ok}")
+        except Exception as e:
+            logger.error(f"[Publish] 后台发布异常: {e}", exc_info=True)
+
+    t = threading.Thread(target=_do_publish, daemon=True)
+    t.start()
+
+    return video_path, (
+        f"✅ 已启动发布流程！\n"
+        f"浏览器窗口将自动打开，请扫码登录抖音创作者平台\n"
+        f"视频将自动上传，标题/文案会自动填写\n"
+        f"请在浏览器中检查信息并手动点击「发布」按钮"
+    )
 
 
 # ===========================================================================
@@ -400,12 +609,14 @@ def check_environment() -> str:
     else:
         lines.append(f"- TTS (CosyVoice): ❌ 未找到 → {tts_path}")
 
-    # LipSync
+    # LipSync (MuseTalk)
     try:
         import modelscope
         from local_models.config import LIPSYNC_CONFIG
         lip_ok = Path(LIPSYNC_CONFIG["local_path"]).is_dir()
-        lines.append(f"- LipSync (MuseTalk): {'✅ 模型就绪' if lip_ok else '❌ 缺失 → ' + LIPSYNC_CONFIG['local_path']}")
+        lines.append(f"- LipSync (MuseTalk v1.5): {'✅ 模型就绪' if lip_ok else '❌ 缺失 → ' + LIPSYNC_CONFIG['local_path']}")
+        if lip_ok:
+            lines.append("  ⚠️ MuseTalk 需要 ~6-8GB 独享显存，加载前会自动卸载其他模型")
     except ImportError:
         lines.append("- LipSync (MuseTalk): ❌ 未安装 (pip install modelscope)")
 
@@ -428,135 +639,295 @@ def refresh_env():
 # Gradio UI
 # ===========================================================================
 
+# 全局 CSS（Gradio 6.x 要求在 launch() 中传入）
+PIPELINE_CSS = """
+.step-header { font-size: 1.15em; font-weight: bold; margin-bottom: 6px; padding: 6px 10px; border-radius: 6px; color: #1f2937; }
+.s0 { background: #fef3c7; color: #1f2937; } .s1 { background: #dbeafe; color: #1f2937; } .s2 { background: #ede9fe; color: #1f2937; } .s3 { background: #d1fae5; color: #1f2937; } .s4 { background: #fce7f3; color: #1f2937; }
+.pipeline-status { font-size: 0.9em; }
+#full-run-btn { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+.douyin-row { background: #f0f9ff; border: 1px dashed #93c5fd; border-radius: 8px; padding: 12px; margin-bottom: 10px; color: #1f2937; }
+"""
+
 def create_pipeline_ui():
-    """创建 Gradio 管线界面"""
+    """创建 Gradio 管线界面 — 横向四步布局"""
 
-    CSS = """
-    .step-header { font-size: 1.1em; font-weight: bold; margin-bottom: 8px; }
-    .pipeline-status { font-size: 0.9em; }
-    #full-run-btn { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
-    """
+    with gr.Blocks(title="口播智能体") as demo:
 
-    with gr.Blocks(title="旗博士 AI 追爆管线", css=CSS, theme=gr.themes.Soft()) as demo:
+        gr.Markdown("# 🎬 口播智能体")
 
-        gr.Markdown("""
-        # 🎬 旗博士 AI 追爆管线
-        **全本地化方案** | ASR → LLM(INT4) → TTS → LipSync | 8GB 显存友好
-        """)
-
-        # ---- 环境状态 ----
-        with gr.Accordion("🖥️ 环境状态", open=False):
-            env_output = gr.Markdown(check_environment())
-            refresh_env_btn = gr.Button("重新检查", size="sm")
-            refresh_env_btn.click(fn=refresh_env, outputs=[env_output])
+        # ================================================================
+        # 🔗 抖音链接下载区
+        # ================================================================
+        with gr.Row(elem_classes=["douyin-row"]):
+            with gr.Column(scale=4):
+                douyin_url = gr.Textbox(
+                    label="🔗 抖音视频链接",
+                    placeholder="粘贴抖音分享链接，例如: https://v.douyin.com/xxxxx/",
+                    lines=1,
+                    show_label=True,
+                )
+            with gr.Column(scale=1, min_width=120):
+                download_btn = gr.Button("📥 下载视频", variant="secondary", size="lg")
+            with gr.Column(scale=2):
+                download_status = gr.Textbox(label="下载状态", interactive=False, show_label=True)
 
         gr.Markdown("---")
 
-        # ---- 输入区 ----
-        with gr.Row(equal_height=False):
-            with gr.Column(scale=1):
-                gr.Markdown('<div class="step-header">📹 步骤一：上传视频</div>')
-                input_video = gr.Video(label="上传口播视频", sources=["upload"])
-
-            with gr.Column(scale=1):
-                gr.Markdown('<div class="step-header">📝 步骤二：文案处理</div>')
-
-                # 步骤 1: 提取文案
-                extract_btn = gr.Button("1️⃣ 提取视频文案", variant="secondary")
+        # ================================================================
+        # 步骤一：视频输入 & 文案提取（横向：上传 | 操作 | 结果）
+        # ================================================================
+        gr.Markdown('<div class="step-header s1">📹 步骤一：视频输入 &amp; 文案提取</div>')
+        with gr.Row(equal_height=True):
+            with gr.Column(scale=1, min_width=200):
+                input_video = gr.Video(label="口播视频", sources=["upload"], height=260)
+            with gr.Column(scale=1, min_width=140):
+                gr.Markdown("")  # spacer
+                extract_btn = gr.Button("1️⃣ 提取视频文案", variant="secondary", size="lg")
+                asr_status = gr.Textbox(label="状态", interactive=False, show_label=True)
+            with gr.Column(scale=2):
                 original_text = gr.Textbox(
                     label="原始文案（可手动编辑）",
-                    lines=6,
-                    placeholder="自动识别后显示...",
+                    lines=8,
+                    placeholder="上传视频后点击提取，或手动粘贴文案...",
+                    show_label=True,
                 )
-                asr_status = gr.Textbox(label="识别状态", interactive=False)
 
-                # 步骤 2: AI 仿写
-                gr.Markdown('<div class="step-header" style="margin-top:12px;">✍️ 步骤三：AI 仿写</div>')
-                with gr.Row():
-                    ai_mode = gr.Radio(
-                        choices=["AI自动仿写", "根据指令仿写"],
-                        value="AI自动仿写",
-                        label="仿写模式",
-                    )
+        gr.Markdown("---")
+
+        # ================================================================
+        # 步骤二：AI 仿写文案（横向：设置 | 操作 | 结果）
+        # ================================================================
+        gr.Markdown('<div class="step-header s2">✍️ 步骤二：AI 仿写文案</div>')
+        with gr.Row(equal_height=True):
+            with gr.Column(scale=1, min_width=200):
+                ai_mode = gr.Radio(
+                    choices=["AI自动仿写", "根据指令仿写"],
+                    value="AI自动仿写",
+                    label="仿写模式",
+                )
                 custom_prompt = gr.Textbox(
                     label="自定义仿写指令",
                     placeholder="例如：用幽默口吻改写，加入网络热梗",
-                    lines=2,
+                    lines=3,
                     visible=False,
                 )
-                rewrite_btn = gr.Button("2️⃣ 执行 AI 仿写", variant="secondary")
+            with gr.Column(scale=1, min_width=140):
+                gr.Markdown("")  # spacer
+                rewrite_btn = gr.Button("2️⃣ 执行 AI 仿写", variant="secondary", size="lg")
+                step_status = gr.Textbox(label="状态", lines=2, interactive=False, show_label=True)
+            with gr.Column(scale=2):
                 rewritten_text = gr.Textbox(
                     label="仿写后文案",
-                    lines=6,
-                    placeholder="仿写结果...",
+                    lines=8,
+                    placeholder="点击执行仿写后显示结果...",
+                    show_label=True,
                 )
 
-                def toggle_prompt(mode):
-                    return gr.update(visible=(mode == "根据指令仿写"))
+        def toggle_prompt(mode):
+            return gr.update(visible=(mode == "根据指令仿写"))
 
-                ai_mode.change(fn=toggle_prompt, inputs=[ai_mode], outputs=[custom_prompt])
+        ai_mode.change(fn=toggle_prompt, inputs=[ai_mode], outputs=[custom_prompt])
 
-        # ---- 输出区 ----
-        with gr.Row(equal_height=False):
-            with gr.Column(scale=1):
-                gr.Markdown('<div class="step-header">🔊 步骤四：语音合成</div>')
-                with gr.Row():
-                    speed_slider = gr.Slider(
-                        value=1.0, minimum=0.5, maximum=2.0, step=0.1,
-                        label="语速调节",
+        gr.Markdown("---")
+
+        # ================================================================
+        # 步骤三：语音合成（横向：音色设置 | 操作 | 结果）
+        # ================================================================
+        gr.Markdown('<div class="step-header s3">🔊 步骤三：语音合成（TTS）</div>')
+        with gr.Row(equal_height=True):
+            with gr.Column(scale=1, min_width=260):
+                # 音色来源
+                voice_mode = gr.Radio(
+                    choices=["内置音色", "上传音频", "录制音频"],
+                    value="内置音色",
+                    label="音色来源",
+                )
+                # 内置音色下拉
+                with gr.Group(visible=True) as builtin_group:
+                    speaker_dd = gr.Dropdown(
+                        choices=["中文女", "中文男", "默认女声", "默认男声"],
+                        value="中文女",
+                        label="内置音色",
                     )
-                tts_btn = gr.Button("3️⃣ 生成语音", variant="secondary")
-                audio_output = gr.Audio(label="合成音频", type="filepath")
-                tts_status = gr.Textbox(label="合成状态", interactive=False)
-
-            with gr.Column(scale=1):
-                gr.Markdown('<div class="step-header">🎭 步骤五：口型合成</div>')
-                lipsync_btn = gr.Button("4️⃣ 生成口型视频", variant="secondary")
-                video_output = gr.Video(label="最终数字人视频")
-                step_status = gr.Textbox(
-                    label="状态日志", lines=3, interactive=False,
-                    elem_classes=["pipeline-status"],
+                # 上传 / 录音（动态显示）
+                with gr.Group(visible=False) as upload_group:
+                    custom_audio_upload = gr.Audio(
+                        label="上传参考音频（WAV/MP3，5-15 秒最佳）",
+                        sources=["upload"],
+                        type="filepath",
+                    )
+                with gr.Group(visible=False) as record_group:
+                    custom_audio_record = gr.Audio(
+                        label="录制参考音频（建议 5-15 秒清晰人声）",
+                        sources=["microphone"],
+                        type="filepath",
+                    )
+                    custom_audio_text = gr.Textbox(
+                        label="参考音频对应的文本（必填）",
+                        placeholder="例如：大家好，欢迎来到我的频道。",
+                        lines=2,
+                    )
+                # 语速
+                speed_slider = gr.Slider(
+                    value=1.0, minimum=0.5, maximum=2.0, step=0.1,
+                    label="语速调节",
                 )
 
-        # ---- 一键全流程 ----
+            with gr.Column(scale=1, min_width=140):
+                gr.Markdown("")  # spacer
+                tts_btn = gr.Button("3️⃣ 生成语音", variant="secondary", size="lg")
+                tts_status = gr.Textbox(label="状态", interactive=False, show_label=True)
+            with gr.Column(scale=2):
+                audio_output = gr.Audio(label="合成音频", type="filepath")
+
+        # 动态切换音色来源的可见性
+        def switch_voice_mode(mode):
+            return (
+                gr.update(visible=(mode == "内置音色")),
+                gr.update(visible=(mode == "上传音频")),
+                gr.update(visible=(mode == "录制音频")),
+            )
+
+        voice_mode.change(
+            fn=switch_voice_mode,
+            inputs=[voice_mode],
+            outputs=[builtin_group, upload_group, record_group],
+        )
+
+        gr.Markdown("---")
+
+        # ================================================================
+        # 步骤四：口型合成（横向：设置 | 操作 | 结果，对齐其他步骤布局）
+        # ================================================================
+        gr.Markdown('<div class="step-header s4">🎭 步骤四：口型合成（MuseTalk）</div>')
+        with gr.Row(equal_height=True):
+            with gr.Column(scale=1, min_width=260):
+                # 引擎信息
+                engine_info = gr.Markdown(
+                    value="**合成引擎：MuseTalk v1.5**  \n"
+                           "高质量口型同步，需要 ~6-8GB 显存。  \n"
+                           "加载前会自动释放 ASR/LLM/TTS 的 GPU 显存。"
+                )
+                # 视频质量（占位，未来扩展）
+                quality_dd = gr.Radio(
+                    choices=["快速", "标准", "高质量"],
+                    value="标准",
+                    label="输出质量",
+                )
+                # 输出信息
+                output_info = gr.Textbox(
+                    label="输出信息",
+                    value="点击 4️⃣ 生成口型视频 即可开始",
+                    interactive=False,
+                    lines=2,
+                )
+            with gr.Column(scale=1, min_width=140):
+                gr.Markdown("")  # spacer
+                lipsync_btn = gr.Button("4️⃣ 生成口型视频", variant="secondary", size="lg")
+                step_status = gr.Textbox(label="状态", interactive=False, show_label=True)
+            with gr.Column(scale=2):
+                video_output = gr.Video(label="最终数字人视频", height=360)
+
+        # ================================================================
+        # 步骤五：发布到抖音
+        # ================================================================
+        gr.Markdown("---")
+        gr.Markdown('<div class="step-header s0">📤 步骤五：发布到抖音</div>')
+        with gr.Row(equal_height=True):
+            with gr.Column(scale=1, min_width=260):
+                publish_info = gr.Markdown(
+                    value="**发布模式：半自动**  \n"
+                           "自动上传视频 + 填写标题和文案，  \n"
+                           "用户在浏览器中手动点击「发布」。  \n"
+                           "⚠️ 首次使用需扫码登录抖音创作者平台。"
+                )
+            with gr.Column(scale=1, min_width=140):
+                gr.Markdown("")
+                publish_btn = gr.Button("📤 发布到抖音", variant="secondary", size="lg")
+                publish_status = gr.Textbox(label="状态", interactive=False, show_label=True)
+            with gr.Column(scale=2):
+                publish_video = gr.Video(label="发布预览", height=360)
+
+        # ================================================================
+        # 一键全流程
+        # ================================================================
         gr.Markdown("---")
         with gr.Row():
-            full_run_btn = gr.Button(
-                "🚀 一键全流程执行",
-                variant="primary",
-                elem_id="full-run-btn",
-                size="lg",
-            )
-        full_status = gr.Textbox(label="全流程状态", lines=3, interactive=False)
+            with gr.Column(scale=1, min_width=200):
+                full_run_btn = gr.Button(
+                    "🚀 一键全流程执行",
+                    variant="primary",
+                    elem_id="full-run-btn",
+                    size="lg",
+                )
+            with gr.Column(scale=3):
+                full_status = gr.Textbox(label="全流程状态", lines=2, interactive=False, show_label=True)
 
         # ===== 事件绑定 =====
 
-        # 步骤 1
+        # 抖音下载
+        download_btn.click(
+            fn=step0_download_douyin,
+            inputs=[douyin_url],
+            outputs=[input_video, download_status],
+        )
+
+        # 步骤 1: 提取文案
         extract_btn.click(
             fn=step1_extract_text,
             inputs=[input_video],
             outputs=[original_text, asr_status],
         )
 
-        # 步骤 2
+        # 步骤 2: AI 仿写
         rewrite_btn.click(
             fn=step2_rewrite,
             inputs=[original_text, ai_mode, custom_prompt],
             outputs=[rewritten_text, step_status],
         )
 
-        # 步骤 3
+        # 步骤 3: 语音合成
+        def _tts_dispatch(
+            text, speed, voice_mode, speaker,
+            custom_audio_upload, custom_audio_record, custom_audio_text,
+        ):
+            """根据 voice_mode 选择正确的参考音频源"""
+            if voice_mode == "上传音频":
+                custom_audio = custom_audio_upload
+            elif voice_mode == "录制音频":
+                custom_audio = custom_audio_record
+            else:
+                custom_audio = None
+            return step3_generate_audio(
+                text=text,
+                speed=speed,
+                voice_mode=voice_mode,
+                speaker=speaker,
+                custom_audio=custom_audio,
+                custom_audio_text=custom_audio_text,
+            )
+
         tts_btn.click(
-            fn=step3_generate_audio,
-            inputs=[rewritten_text, speed_slider],
+            fn=_tts_dispatch,
+            inputs=[
+                rewritten_text, speed_slider, voice_mode, speaker_dd,
+                custom_audio_upload, custom_audio_record, custom_audio_text,
+            ],
             outputs=[audio_output, tts_status],
         )
 
-        # 步骤 4
+        # 步骤 4: 口型合成
         lipsync_btn.click(
             fn=step4_lipsync,
             inputs=[input_video, audio_output],
             outputs=[video_output, step_status],
+        )
+
+        # 步骤 5: 发布到抖音
+        publish_btn.click(
+            fn=step5_publish,
+            inputs=[video_output, rewritten_text],
+            outputs=[publish_video, publish_status],
         )
 
         # 一键全流程
@@ -580,4 +951,6 @@ if __name__ == "__main__":
         server_port=7861,
         share=False,
         show_error=True,
+        css=PIPELINE_CSS,
+        theme=gr.themes.Default(),
     )

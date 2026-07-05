@@ -43,7 +43,7 @@ ASR_CONFIG = {
 LLM_CONFIG = {
     "name": "Qwen2.5-0.5B-Instruct",
     "local_path": str(LOCAL_MODELS_DIR / "Qwen2.5-0.5B-Instruct"),
-    "quantization": "int4",  # INT4 量化 ~0.5GB 显存
+    "quantization": "fp16",  # FP16 ~1GB 显存（INT4 在 0.5B 模型上指令遵循能力退化严重）
 }
 
 # TTS — ModelScope pipeline，本地 CosyVoice Lite 模型（~1-2GB 显存）

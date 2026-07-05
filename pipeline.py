@@ -477,11 +477,16 @@ def step6_img2video(image_path: str, force: bool = False):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Step 7: Wav2Lip 口型同步
+# Step 7: 口型同步 (MuseTalk / Wav2Lip)
 # ═══════════════════════════════════════════════════════════════════
 
-def step7_lipsync(force: bool = False):
-    """对动态视频进行口型同步"""
+def step7_lipsync(force: bool = False, use_musetalk: bool = True):
+    """对动态视频进行口型同步
+
+    Args:
+        force: 强制重跑，忽略缓存
+        use_musetalk: True=使用 MuseTalk, False=使用 Wav2Lip
+    """
     if not os.path.exists(IMG_VIDEO):
         logger.error("[Step7] 动态视频不存在，请先运行 Step6")
         return None
@@ -494,7 +499,6 @@ def step7_lipsync(force: bool = False):
         return LIPSYNC_VIDEO
 
     import librosa, soundfile as sf, torch
-    from local_models.lipsync import Wav2LipEngine
 
     # 转换音频 16kHz
     t1 = time.time()
@@ -503,24 +507,47 @@ def step7_lipsync(force: bool = False):
     sf.write(audio_16k, wav, 16000)
     logger.info(f"[Step7] 音频转换: {len(wav)/16000:.1f}s @ 16kHz")
 
-    # 加载模型
-    engine = Wav2LipEngine()
-    if not engine.load():
-        logger.error("[Step7] Wav2Lip 模型加载失败")
-        return None
-    vram = torch.cuda.memory_allocated() / 1024**3
-    logger.info(f"[Step7] 模型加载完成，显存: {vram:.2f} GB")
+    if use_musetalk:
+        # ── MuseTalk (高质量) ──
+        from local_models.musetalk_engine import MuseTalkEngine
 
-    # 推理
-    logger.info(f"[Step7] Wav2Lip 口型同步推理...")
-    t2 = time.time()
-    result = engine.generate(
-        video_path=IMG_VIDEO,
-        audio_path=audio_16k,
-        output_path=LIPSYNC_VIDEO,
-        fps=25,
-    )
-    engine.unload()
+        engine = MuseTalkEngine()
+        if not engine.load():
+            logger.error("[Step7] MuseTalk 模型加载失败")
+            return None
+        vram = torch.cuda.memory_allocated() / 1024**3
+        logger.info(f"[Step7] MuseTalk 模型加载完成，显存: {vram:.2f} GB")
+
+        logger.info(f"[Step7] MuseTalk 口型同步推理...")
+        t2 = time.time()
+        result = engine.generate(
+            video_path=IMG_VIDEO,
+            audio_path=audio_16k,
+            output_path=LIPSYNC_VIDEO,
+            fps=25,
+            batch_size=8,
+        )
+        engine.unload()
+    else:
+        # ── Wav2Lip (轻量备选) ──
+        from local_models.lipsync import Wav2LipEngine
+
+        engine = Wav2LipEngine()
+        if not engine.load():
+            logger.error("[Step7] Wav2Lip 模型加载失败")
+            return None
+        vram = torch.cuda.memory_allocated() / 1024**3
+        logger.info(f"[Step7] Wav2Lip 模型加载完成，显存: {vram:.2f} GB")
+
+        logger.info(f"[Step7] Wav2Lip 口型同步推理...")
+        t2 = time.time()
+        result = engine.generate(
+            video_path=IMG_VIDEO,
+            audio_path=audio_16k,
+            output_path=LIPSYNC_VIDEO,
+            fps=25,
+        )
+        engine.unload()
 
     if result and os.path.exists(result):
         size_mb = os.path.getsize(result) / 1024**2
@@ -654,6 +681,7 @@ def main():
     parser.add_argument("--skip-tts", action="store_true", help="跳过 TTS")
     parser.add_argument("--skip-img2video", action="store_true", help="跳过图片转视频")
     parser.add_argument("--skip-lipsync", action="store_true", help="跳过口型同步")
+    parser.add_argument("--wav2lip", action="store_true", help="使用 Wav2Lip 口型同步（默认使用 MuseTalk）")
     parser.add_argument("--publish", action="store_true", help="流程结束后自动打开发布页面")
     parser.add_argument("--profile", type=str, default=None, help="抖音浏览器持久化目录（复用登录态）")
     parser.add_argument("--confirm", action="store_true", help="抖音发布：填表后不自动点击发布，需人工确认")
@@ -761,7 +789,8 @@ def main():
 
     # ── Step 7: 口型同步 ──
     if not args.skip_lipsync:
-        lipsync_result = step7_lipsync(force=force)
+        use_musetalk = not args.wav2lip
+        lipsync_result = step7_lipsync(force=force, use_musetalk=use_musetalk)
         if not lipsync_result:
             return 1
     else:
