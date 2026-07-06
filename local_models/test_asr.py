@@ -18,7 +18,7 @@ from local_models.asr_engine import ASREngine
 if __name__ == "__main__":
     audio_file = input("音频文件路径: ").strip()
     if not os.path.exists(audio_file):
-        print(f"❌ 文件不存在: {audio_file}")
+        print(f" 文件不存在: {audio_file}")
         sys.exit(1)
 
     asr = ASREngine()

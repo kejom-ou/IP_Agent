@@ -19,7 +19,7 @@ if __name__ == "__main__":
     engine = LocalLLMEngine()
     print("加载本地 LLM 模型...")
     if not engine.init():
-        print("❌ 加载失败")
+        print(" 加载失败")
         sys.exit(1)
 
     print("\n模型就绪，输入文案进行仿写（输入 q 退出）")

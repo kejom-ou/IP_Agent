@@ -81,7 +81,7 @@ def check_environment():
     for name, path in required_models.items():
         if path.exists():
             size_gb = path.stat().st_size / 1024**3
-            logger.info(f"  ✅ {name}: {size_gb:.1f} GB")
+            logger.info(f"   {name}: {size_gb:.1f} GB")
             model_ok = True
         else:
             if "(可选)" not in name:
@@ -122,17 +122,17 @@ def check_environment():
         logger.error("=" * 60)
         logger.error("环境检查失败！")
         for e in errors:
-            logger.error(f"  ❌ {e}")
+            logger.error(f"   {e}")
         logger.error("=" * 60)
         return False
 
     if warnings:
         logger.warning("=" * 60)
         for w in warnings:
-            logger.warning(f"  ⚠️  {w}")
+            logger.warning(f"    {w}")
         logger.warning("=" * 60)
 
-    logger.info("✅ 环境检查通过")
+    logger.info(" 环境检查通过")
     return True
 
 
@@ -227,7 +227,7 @@ def run_musetalk(
 
     load_time = time.time() - t_load
     vram = torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0
-    logger.info(f"  ✅ 加载完成 ({load_time:.1f}s, 显存: {vram:.2f} GB)")
+    logger.info(f"   加载完成 ({load_time:.1f}s, 显存: {vram:.2f} GB)")
 
     # ── 推理 ──
     logger.info("[2/3] 口型合成推理...")
@@ -265,7 +265,7 @@ def run_musetalk(
 
     # ── 汇总 ──
     logger.info("=" * 60)
-    logger.info("✅ MuseTalk 测试完成！")
+    logger.info(" MuseTalk 测试完成！")
     logger.info(f"  输出文件: {result}")
     logger.info(f"  文件大小: {size_mb:.1f} MB")
     logger.info(f"  模型加载: {load_time:.1f}s")

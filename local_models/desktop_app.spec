@@ -19,12 +19,24 @@ a = Analysis(
     pathex=[str(ROOT), str(ROOT / 'local_models')],
     binaries=[],
     datas=[
-        # 项目模块（必须打包）
+        # 项目模块（必须打包，含条件 import 的引擎模块）
+        (str(ROOT / 'local_models' / '__init__.py'), 'local_models'),
+        (str(ROOT / 'local_models' / 'config.py'), 'local_models'),
+        (str(ROOT / 'local_models' / 'asr_engine.py'), 'local_models'),
+        (str(ROOT / 'local_models' / 'llm_engine.py'), 'local_models'),
+        (str(ROOT / 'local_models' / 'tts_engine.py'), 'local_models'),
+        (str(ROOT / 'local_models' / 'musetalk_engine.py'), 'local_models'),
         (str(ROOT / 'local_models' / 'pipeline_gradio.py'), 'local_models'),
+        (str(ROOT / 'local_models' / 'douyin_crawler.py'), 'local_models'),
         (str(ROOT / 'local_models' / 'modules.py'), 'local_models'),
         # 静态资源（如果有的话）
     ],
     hiddenimports=[
+        # === 本地模块（条件 import，PyInstaller 无法自动发现）===
+        'local_models', 'local_models.config', 'local_models.modules',
+        'local_models.asr_engine', 'local_models.llm_engine',
+        'local_models.tts_engine', 'local_models.musetalk_engine',
+        'local_models.pipeline_gradio', 'local_models.douyin_crawler',
         # === PySide6 ===
         'PySide6.QtCore', 'PySide6.QtGui', 'PySide6.QtWidgets',
         'PySide6.QtMultimedia', 'PySide6.QtMultimediaWidgets',

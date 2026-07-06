@@ -318,7 +318,7 @@ class WorkerThread(QThread):
     def run(self):
         if self._is_cancelled:
             return
-        self.started.emit(f"⏳ {self.task_name} 开始...")
+        self.started.emit(f" {self.task_name} 开始...")
         self.progress.emit(f"执行中: {self.task_name}", 0)
         try:
             if self._is_cancelled:
@@ -328,11 +328,11 @@ class WorkerThread(QThread):
                 self.finished.emit(
                     result if isinstance(result, dict) else {"result": result}
                 )
-                self.progress.emit(f"✅ {self.task_name} 完成", 100)
+                self.progress.emit(f" {self.task_name} 完成", 100)
         except Exception as e:
             logger.error(f"[{self.task_name}] 失败: {e}", exc_info=True)
             if not self._is_cancelled:
-                self.error.emit(f"❌ {self.task_name} 失败: {str(e)}")
+                self.error.emit(f" {self.task_name} 失败: {str(e)}")
 
 
 # ===========================================================================
@@ -356,11 +356,11 @@ class SidebarButton(QPushButton):
 # ===========================================================================
 class DesktopApp(QMainWindow):
     SIDEBAR_BTNS = [
-        ("📹", "视频输入"),
-        ("✍️", "AI 仿写"),
-        ("🔊", "语音合成"),
-        ("🎭", "口型合成"),
-        ("📺", "预览导出"),
+        ("", "视频输入"),
+        ("", "AI 仿写"),
+        ("", "语音合成"),
+        ("", "口型合成"),
+        ("", "预览导出"),
     ]
 
     def __init__(self):
@@ -406,7 +406,7 @@ class DesktopApp(QMainWindow):
 
     def _do_cleanup(self):
         """退出前清理所有资源（线程 / 子进程 / GPU模型单例 / 显存）"""
-        logger.info("🛑 正在退出程序...")
+        logger.info(" 正在退出程序...")
 
         # ── 1. 停止媒体播放器 ──
         if hasattr(self, "media_player"):
@@ -434,7 +434,7 @@ class DesktopApp(QMainWindow):
             _unload_tts()       # CosyVoice
             _unload_llm()       # Qwen INT4 ~0.5 GB
             _unload_asr()       # FunASR ~1-2 GB
-            logger.info("🧹 所有 GPU 模型单例已卸载")
+            logger.info(" 所有 GPU 模型单例已卸载")
         except Exception as e:
             logger.warning(f"卸载模型单例异常: {e}")
 
@@ -448,7 +448,7 @@ class DesktopApp(QMainWindow):
                     if not any(pat in pname for pat in orphan_patterns):
                         continue
                     proc.kill()
-                    logger.info(f"🔪 已终止子进程: {pname}")
+                    logger.info(f" 已终止子进程: {pname}")
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
         except ImportError:
@@ -468,7 +468,7 @@ class DesktopApp(QMainWindow):
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
                 vram = torch.cuda.memory_allocated() / 1024**3
-                logger.info(f"🧹 CUDA 显存已释放 (残余: {vram:.2f} GB)")
+                logger.info(f" CUDA 显存已释放 (残余: {vram:.2f} GB)")
             gc.collect()          # 二次回收（empty_cache 后可能触发新的弱引用）
         except ImportError:
             pass
@@ -477,7 +477,7 @@ class DesktopApp(QMainWindow):
         if hasattr(self, "tray_icon"):
             self.tray_icon.hide()
 
-        logger.info("✅ 程序已退出")
+        logger.info(" 程序已退出")
 
     # ── 系统托盘 ──
     def _create_tray(self):
@@ -506,11 +506,11 @@ class DesktopApp(QMainWindow):
 
         # 右键菜单
         menu = QMenu()
-        show_action = QAction("📋 显示窗口", self)
+        show_action = QAction(" 显示窗口", self)
         show_action.triggered.connect(self._show_from_tray)
         menu.addAction(show_action)
         menu.addSeparator()
-        quit_action = QAction("❌ 退出程序", self)
+        quit_action = QAction(" 退出程序", self)
         quit_action.triggered.connect(self._quit_app)
         menu.addAction(quit_action)
         self.tray_icon.setContextMenu(menu)
@@ -567,7 +567,7 @@ class DesktopApp(QMainWindow):
         layout.setContentsMargins(16, 0, 16, 0)
 
         # Logo
-        logo = QLabel("🎬  口播智能体")
+        logo = QLabel("  口播智能体")
         logo.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
         logo.setStyleSheet("color: #1a1a2e;")
         layout.addWidget(logo)
@@ -575,7 +575,7 @@ class DesktopApp(QMainWindow):
         layout.addStretch()
 
         # 一键全流程（头部快捷按钮）
-        self.header_run_btn = QPushButton("🚀 一键全流程")
+        self.header_run_btn = QPushButton(" 一键全流程")
         self.header_run_btn.setObjectName("primaryBtn")
         self.header_run_btn.setFixedHeight(34)
         self.header_run_btn.clicked.connect(self._on_full_pipeline)
@@ -674,29 +674,29 @@ class DesktopApp(QMainWindow):
     # ================================================================
     def _create_page_input(self):
         page, layout = self._create_page_wrapper(
-            "📹 视频输入", "输入抖音链接或选择本地视频，自动提取口播文案"
+            " 视频输入", "输入抖音链接或选择本地视频，自动提取口播文案"
         )
 
         # ── 抖音链接 ──
-        grp_url = QGroupBox("🔗 抖音链接下载")
+        grp_url = QGroupBox(" 抖音链接下载")
         url_layout = QHBoxLayout(grp_url)
         self.url_input = QLineEdit()
         self.url_input.setPlaceholderText("粘贴抖音分享链接，例如: https://v.douyin.com/xxxxx/")
         self.url_input.setMinimumHeight(38)
         url_layout.addWidget(self.url_input, 3)
-        self.download_btn = QPushButton("📥 下载")
+        self.download_btn = QPushButton(" 下载")
         self.download_btn.setObjectName("primaryBtn")
         self.download_btn.clicked.connect(self._on_download)
         url_layout.addWidget(self.download_btn, 1)
         layout.addWidget(grp_url)
 
         # ── 本地视频 ──
-        grp_video = QGroupBox("📁 本地视频 & 文案提取")
+        grp_video = QGroupBox(" 本地视频 & 文案提取")
         v_layout = QHBoxLayout(grp_video)
         v_layout.setSpacing(16)
 
         left = QVBoxLayout()
-        self.upload_btn = QPushButton("📂 选择本地视频/音频")
+        self.upload_btn = QPushButton(" 选择本地视频/音频")
         self.upload_btn.clicked.connect(self._on_upload_video)
         left.addWidget(self.upload_btn)
         self.video_path_label = QLabel("未选择文件")
@@ -708,7 +708,7 @@ class DesktopApp(QMainWindow):
 
         right = QVBoxLayout()
         right.setSpacing(6)
-        self.extract_btn = QPushButton("🔍 提取视频文案")
+        self.extract_btn = QPushButton(" 提取视频文案")
         self.extract_btn.setObjectName("primaryBtn")
         self.extract_btn.clicked.connect(self._on_extract_text)
         right.addWidget(self.extract_btn)
@@ -731,7 +731,7 @@ class DesktopApp(QMainWindow):
     # ================================================================
     def _create_page_rewrite(self):
         page, layout = self._create_page_wrapper(
-            "✍️ AI 仿写", "基于原文案用大模型仿写，自动生成标题和标签"
+            " AI 仿写", "基于原文案用大模型仿写，自动生成标题和标签"
         )
 
         grp = QGroupBox("仿写设置")
@@ -751,7 +751,7 @@ class DesktopApp(QMainWindow):
         self.custom_prompt_input.setVisible(False)
         g_layout.addWidget(self.custom_prompt_input, 1, 0, 1, 2)
 
-        self.rewrite_btn = QPushButton("🔄 执行 AI 仿写")
+        self.rewrite_btn = QPushButton(" 执行 AI 仿写")
         self.rewrite_btn.setObjectName("primaryBtn")
         self.rewrite_btn.clicked.connect(self._on_rewrite)
         g_layout.addWidget(self.rewrite_btn, 2, 0, 1, 2)
@@ -764,13 +764,13 @@ class DesktopApp(QMainWindow):
         self.rewritten_text_edit.setMaximumHeight(100)
         g_layout.addWidget(self.rewritten_text_edit, 5, 0, 1, 2)
 
-        g_layout.addWidget(QLabel("📌 视频标题:"), 6, 0)
+        g_layout.addWidget(QLabel(" 视频标题:"), 6, 0)
         self.title_output = QLineEdit()
         self.title_output.setPlaceholderText("AI 自动生成")
         self.title_output.setMinimumHeight(34)
         g_layout.addWidget(self.title_output, 6, 1)
 
-        g_layout.addWidget(QLabel("🏷️ 标签:"), 7, 0)
+        g_layout.addWidget(QLabel(" 标签:"), 7, 0)
         self.tags_output = QLineEdit()
         self.tags_output.setPlaceholderText("AI 自动生成")
         self.tags_output.setMinimumHeight(34)
@@ -793,7 +793,7 @@ class DesktopApp(QMainWindow):
     # ================================================================
     def _create_page_tts(self):
         page, layout = self._create_page_wrapper(
-            "🔊 语音合成", "CosyVoice 文本转语音，支持内置音色和自定义参考音频"
+            " 语音合成", "CosyVoice 文本转语音，支持内置音色和自定义参考音频"
         )
 
         grp = QGroupBox("TTS 设置")
@@ -847,7 +847,7 @@ class DesktopApp(QMainWindow):
             lambda v: self.speed_label.setText(f"{v / 10:.1f}x")
         )
 
-        self.tts_btn = QPushButton("🔊 生成语音")
+        self.tts_btn = QPushButton(" 生成语音")
         self.tts_btn.setObjectName("primaryBtn")
         self.tts_btn.clicked.connect(self._on_tts)
         g_layout.addWidget(self.tts_btn, 6, 0, 1, 2)
@@ -864,7 +864,7 @@ class DesktopApp(QMainWindow):
     # ================================================================
     def _create_page_lipsync(self):
         page, layout = self._create_page_wrapper(
-            "🎭 口型合成", "MuseTalk 数字人口型驱动，音频 + 人物视频 → 口型同步视频"
+            " 口型合成", "MuseTalk 数字人口型驱动，音频 + 人物视频 → 口型同步视频"
         )
 
         grp = QGroupBox("口型合成设置")
@@ -876,7 +876,7 @@ class DesktopApp(QMainWindow):
 
         left = QVBoxLayout()
         left.setSpacing(6)
-        self.avatar_btn = QPushButton("🖼️ 选择数字人形象视频/图片")
+        self.avatar_btn = QPushButton(" 选择数字人形象视频/图片")
         self.avatar_btn.clicked.connect(self._on_upload_avatar)
         left.addWidget(self.avatar_btn)
         self.avatar_label = QLabel("未选择（将使用参考视频）")
@@ -888,7 +888,7 @@ class DesktopApp(QMainWindow):
 
         right = QVBoxLayout()
         right.setSpacing(6)
-        self.lipsync_btn = QPushButton("🎬 生成口型视频")
+        self.lipsync_btn = QPushButton(" 生成口型视频")
         self.lipsync_btn.setObjectName("primaryBtn")
         self.lipsync_btn.clicked.connect(self._on_lipsync)
         right.addWidget(self.lipsync_btn)
@@ -908,7 +908,7 @@ class DesktopApp(QMainWindow):
     # ================================================================
     def _create_page_preview(self):
         page, layout = self._create_page_wrapper(
-            "📺 预览 & 导出", "预览生成的最终视频，导出到本地或发布到抖音"
+            " 预览 & 导出", "预览生成的最终视频，导出到本地或发布到抖音"
         )
 
         grp = QGroupBox("视频预览")
@@ -925,14 +925,14 @@ class DesktopApp(QMainWindow):
         self.play_btn = QPushButton("▶ 播放")
         self.play_btn.clicked.connect(self._on_play)
         ctrl_row.addWidget(self.play_btn)
-        self.pause_btn = QPushButton("⏸ 暂停")
+        self.pause_btn = QPushButton(" 暂停")
         self.pause_btn.clicked.connect(self._on_pause)
         ctrl_row.addWidget(self.pause_btn)
-        self.stop_btn = QPushButton("⏹ 停止")
+        self.stop_btn = QPushButton(" 停止")
         self.stop_btn.clicked.connect(self._on_stop)
         ctrl_row.addWidget(self.stop_btn)
         ctrl_row.addStretch()
-        self.save_btn = QPushButton("💾 导出到本地")
+        self.save_btn = QPushButton(" 导出到本地")
         self.save_btn.setObjectName("primaryBtn")
         self.save_btn.clicked.connect(self._on_save_video)
         ctrl_row.addWidget(self.save_btn)
@@ -943,7 +943,7 @@ class DesktopApp(QMainWindow):
 
         # 抖音发布按钮
         pub_row = QHBoxLayout()
-        self.publish_btn = QPushButton("📤 发布到抖音")
+        self.publish_btn = QPushButton(" 发布到抖音")
         self.publish_btn.setObjectName("accentBtn")
         self.publish_btn.clicked.connect(self._on_publish)
         pub_row.addWidget(self.publish_btn)
@@ -972,7 +972,7 @@ class DesktopApp(QMainWindow):
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(16, 0, 16, 0)
 
-        self.global_status = QLabel("👋 就绪  |  点击右上角 X 可最小化到托盘")
+        self.global_status = QLabel(" 就绪  |  点击右上角 X 可最小化到托盘")
         self.global_status.setObjectName("statusLabel")
         layout.addWidget(self.global_status)
 
@@ -1011,7 +1011,7 @@ class DesktopApp(QMainWindow):
             self.worker = None
 
         self._set_busy(True, progress_bar)
-        self.global_status.setText(f"⏳ {task_name} 执行中...")
+        self.global_status.setText(f" {task_name} 执行中...")
         self.worker = WorkerThread(task_func, task_name, **kwargs)
         self.worker.finished.connect(lambda r: on_finished(r))
         self.worker.finished.connect(
@@ -1046,13 +1046,13 @@ class DesktopApp(QMainWindow):
         if path:
             self.video_path = path
             self.video_path_label.setText(os.path.basename(path))
-            self.asr_status.setText(f"✅ 已选择: {os.path.basename(path)}")
+            self.asr_status.setText(f" 已选择: {os.path.basename(path)}")
             logger.info(f"[上传] 文件: {path}")
 
     def _on_download(self):
         url = self.url_input.text().strip()
         if not url:
-            self.asr_status.setText("❌ 请输入抖音链接")
+            self.asr_status.setText(" 请输入抖音链接")
             return
         self._run_worker(
             self.__do_download, "抖音下载",
@@ -1072,14 +1072,14 @@ class DesktopApp(QMainWindow):
         if vp and os.path.exists(vp):
             self.video_path = vp if isinstance(vp, str) else str(vp)
             self.video_path_label.setText(os.path.basename(self.video_path))
-            self.asr_status.setText(f"✅ {r.get('status', '下载完成')}")
+            self.asr_status.setText(f" {r.get('status', '下载完成')}")
             self._do_extract()
         else:
-            self.asr_status.setText(f"❌ {r.get('status', '下载失败')}")
+            self.asr_status.setText(f" {r.get('status', '下载失败')}")
 
     def _on_extract_text(self):
         if not self.video_path:
-            self.asr_status.setText("❌ 请先选择视频或下载抖音视频")
+            self.asr_status.setText(" 请先选择视频或下载抖音视频")
             return
         self._do_extract()
 
@@ -1098,7 +1098,7 @@ class DesktopApp(QMainWindow):
     def __on_extract_done(self, r: dict):
         self.original_text = r.get("text", "")
         self.original_text_edit.setPlainText(self.original_text)
-        self.asr_status.setText(r.get("status", "✅ 完成"))
+        self.asr_status.setText(r.get("status", " 完成"))
 
     # ── 页面 1: AI 仿写 ──
     def _on_rewrite_mode_changed(self, mode: str):
@@ -1107,7 +1107,7 @@ class DesktopApp(QMainWindow):
     def _on_rewrite(self):
         text = self.original_text_edit.toPlainText().strip()
         if not text:
-            self.rewrite_status.setText("❌ 请先提取或输入文案")
+            self.rewrite_status.setText(" 请先提取或输入文案")
             return
         mode = self.rewrite_mode.currentText()
         prompt = (
@@ -1137,7 +1137,7 @@ class DesktopApp(QMainWindow):
         self.rewritten_text_edit.setPlainText(self.rewritten_text)
         self.title_output.setText(self.video_title)
         self.tags_output.setText(self.video_tags)
-        self.rewrite_status.setText(r.get("status", "✅ 完成"))
+        self.rewrite_status.setText(r.get("status", " 完成"))
 
     # ── 页面 2: TTS ──
     def _on_tts_mode_changed(self, mode: str):
@@ -1161,7 +1161,7 @@ class DesktopApp(QMainWindow):
         if not text:
             text = self.original_text_edit.toPlainText().strip()
         if not text:
-            self.tts_status.setText("❌ 请先获取文案")
+            self.tts_status.setText(" 请先获取文案")
             return
 
         mode = self.tts_mode.currentText()
@@ -1206,10 +1206,10 @@ class DesktopApp(QMainWindow):
     def _on_lipsync(self):
         avatar = getattr(self, "avatar_path", None)
         if not avatar and not self.video_path:
-            self.lipsync_status.setText("❌ 请先上传数字人形象或参考视频")
+            self.lipsync_status.setText(" 请先上传数字人形象或参考视频")
             return
         if not self.audio_path:
-            self.lipsync_status.setText("❌ 请先生成语音（TTS）")
+            self.lipsync_status.setText(" 请先生成语音（TTS）")
             return
 
         self._run_worker(
@@ -1229,7 +1229,7 @@ class DesktopApp(QMainWindow):
         self.lipsync_status.setText(r.get("status", ""))
         if self.final_video:
             self._switch_page(4)
-            self.preview_status.setText(f"✅ {r.get('status', '生成完成')}")
+            self.preview_status.setText(f" {r.get('status', '生成完成')}")
 
     # ── 页面 4: 预览 ──
     def _on_play(self):
@@ -1245,7 +1245,7 @@ class DesktopApp(QMainWindow):
 
     def _on_save_video(self):
         if not self.final_video:
-            self.preview_status.setText("❌ 尚未生成视频")
+            self.preview_status.setText(" 尚未生成视频")
             return
         save_path, _ = QFileDialog.getSaveFileName(
             self, "导出视频", "output.mp4",
@@ -1255,14 +1255,14 @@ class DesktopApp(QMainWindow):
             try:
                 import shutil
                 shutil.copy2(self.final_video, save_path)
-                self.preview_status.setText(f"✅ 已导出到: {save_path}")
+                self.preview_status.setText(f" 已导出到: {save_path}")
             except Exception as e:
-                self.preview_status.setText(f"❌ 导出失败: {e}")
+                self.preview_status.setText(f" 导出失败: {e}")
 
     # ── 全流程 & 发布 ──
     def _on_full_pipeline(self):
         if not self.video_path:
-            self.global_status.setText("❌ 请先选择视频或下载抖音视频")
+            self.global_status.setText(" 请先选择视频或下载抖音视频")
             return
         avatar = getattr(self, "avatar_path", None)
         self._run_worker(
@@ -1283,8 +1283,8 @@ class DesktopApp(QMainWindow):
         items.append("[1/4] 提取文案...")
         text, status = step1_extract_text(video_path)
         if not text:
-            items.append(f"❌ {status}"); return {"status": "\n".join(items)}
-        items.append(f"✅ {status}")
+            items.append(f" {status}"); return {"status": "\n".join(items)}
+        items.append(f" {status}")
 
         # Step 2
         items.append("[2/4] AI 仿写...")
@@ -1292,7 +1292,7 @@ class DesktopApp(QMainWindow):
         rewritten = res[0]; title = res[1] if len(res) > 1 else ""
         tags = res[2] if len(res) > 2 else ""
         rstatus = res[3] if len(res) > 3 else "OK"
-        items.append(f"✅ {rstatus}")
+        items.append(f" {rstatus}")
 
         # Step 3
         items.append("[3/4] 语音合成...")
@@ -1300,15 +1300,15 @@ class DesktopApp(QMainWindow):
             text=rewritten, speed=1.0, voice_mode="内置音色", speaker="中文女",
         )
         if not audio:
-            items.append(f"❌ {tstatus}")
+            items.append(f" {tstatus}")
             return {"status": "\n".join(items), "rewritten": rewritten,
                     "title": title, "tags": tags}
-        items.append(f"✅ {tstatus}")
+        items.append(f" {tstatus}")
 
         # Step 4
         items.append("[4/4] 口型合成（MuseTalk）...")
         video, vstatus = step4_lipsync(avatar_path, audio, video_path)
-        items.append(f"✅ {vstatus}")
+        items.append(f" {vstatus}")
 
         return {
             "status": "\n".join(items),
@@ -1317,7 +1317,7 @@ class DesktopApp(QMainWindow):
         }
 
     def __on_full_done(self, r: dict):
-        self.global_status.setText("✅ 全流程完成")
+        self.global_status.setText(" 全流程完成")
         self.rewritten_text = r.get("rewritten", "")
         self.video_title = r.get("title", "")
         self.video_tags = r.get("tags", "")
@@ -1328,11 +1328,11 @@ class DesktopApp(QMainWindow):
         self.final_video = r.get("video_path")
         if self.final_video:
             self._switch_page(4)
-            self.preview_status.setText("✅ 全流程完成")
+            self.preview_status.setText(" 全流程完成")
 
     def _on_publish(self):
         if not self.final_video:
-            self.global_status.setText("❌ 请先生成最终视频")
+            self.global_status.setText(" 请先生成最终视频")
             return
         self._run_worker(
             self.__do_publish, "发布到抖音",
@@ -1350,7 +1350,7 @@ class DesktopApp(QMainWindow):
         return {"status": str(result)}
 
     def __on_publish_done(self, r: dict):
-        self.global_status.setText(f"✅ {r.get('status', '发布完成')}")
+        self.global_status.setText(f" {r.get('status', '发布完成')}")
 
 
 # ===========================================================================

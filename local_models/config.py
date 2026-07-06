@@ -68,7 +68,7 @@ def get_llm_model() -> dict:
 
 def _check_local_or_warn(local_path: str, name: str):
     if not Path(local_path).exists():
-        logger.warning(f"⚠️ 本地模型目录不存在: {local_path}")
+        logger.warning(f" 本地模型目录不存在: {local_path}")
         logger.warning(f"   请将 {name} 模型放到 {local_path}")
 
 
@@ -84,6 +84,6 @@ if __name__ == "__main__":
     print(f"模型目录: {LOCAL_MODELS_DIR}")
     if LOCAL_MODELS_DIR.exists():
         for d in LOCAL_MODELS_DIR.iterdir():
-            print(f"  {'✅' if d.is_dir() else '  '} {d.name}")
+            print(f"  {'' if d.is_dir() else '  '} {d.name}")
     else:
         print("  (目录不存在，请创建并放入模型)")
