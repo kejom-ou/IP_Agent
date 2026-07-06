@@ -405,26 +405,43 @@ class DesktopApp(QMainWindow):
             event.ignore()
 
     def _do_cleanup(self):
-        """退出前清理资源"""
+        """退出前清理所有资源（线程 / 子进程 / GPU模型单例 / 显存）"""
         logger.info("🛑 正在退出程序...")
-        # 1. 停止媒体播放器
+
+        # ── 1. 停止媒体播放器 ──
         if hasattr(self, "media_player"):
             try:
                 self.media_player.stop()
                 self.media_player.setVideoOutput(None)
             except Exception:
                 pass
-        # 2. 取消后台线程
+
+        # ── 2. 取消后台工作线程 ──
         if self.worker and self.worker.isRunning():
             try:
                 self.worker.cancel()
             except Exception as e:
                 logger.warning(f"取消任务异常: {e}")
-        # 3. 杀子进程
+
+        # ── 3. 卸载所有 GPU 模型单例 (ASR / LLM / TTS / LipSync) ──
+        # 必须先 del Python 对象让 CUDA tensor 引用归零，
+        # 再 gc.collect() + empty_cache() 才能真正释放显存。
+        try:
+            from local_models.pipeline_gradio import (
+                _unload_asr, _unload_llm, _unload_tts, _unload_lipsync,
+            )
+            _unload_lipsync()   # MuseTalk ~6-8 GB（优先级最高）
+            _unload_tts()       # CosyVoice
+            _unload_llm()       # Qwen INT4 ~0.5 GB
+            _unload_asr()       # FunASR ~1-2 GB
+            logger.info("🧹 所有 GPU 模型单例已卸载")
+        except Exception as e:
+            logger.warning(f"卸载模型单例异常: {e}")
+
+        # ── 4. 杀孤儿子进程 ──
         orphan_patterns = ["ffmpeg", "ffprobe", "chromium", "chrome", "playwright"]
         try:
             import psutil
-            current_pid = os.getpid()
             for proc in psutil.process_iter(["pid", "name"]):
                 try:
                     pname = (proc.info["name"] or "").lower()
@@ -441,20 +458,25 @@ class DesktopApp(QMainWindow):
                                capture_output=True, timeout=5)
             except Exception:
                 pass
-        # 4. 释放 GPU
+
+        # ── 5. 强制回收已释放的 CUDA 显存 + Python GC ──
         try:
             import gc
             import torch
+            gc.collect()          # 先回收 Python 侧已 del 的对象
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
-                logger.info("🧹 CUDA 显存已释放")
-            gc.collect()
+                vram = torch.cuda.memory_allocated() / 1024**3
+                logger.info(f"🧹 CUDA 显存已释放 (残余: {vram:.2f} GB)")
+            gc.collect()          # 二次回收（empty_cache 后可能触发新的弱引用）
         except ImportError:
             pass
-        # 5. 隐藏托盘图标
+
+        # ── 6. 隐藏托盘图标 ──
         if hasattr(self, "tray_icon"):
             self.tray_icon.hide()
+
         logger.info("✅ 程序已退出")
 
     # ── 系统托盘 ──
